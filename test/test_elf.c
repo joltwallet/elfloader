@@ -5,10 +5,16 @@
 #include <esp_partition.h>
 #include <esp_err.h>
 
+#include "sodium.h"
+
 #include "loader.h"
 
 static const ELFLoaderSymbol_t exports[] = {
-    { "puts", (void*) puts }
+    { "puts", (void*) puts },
+    { "sqrt", (void*) sqrt },
+    { "crypto_generichash", (void*) crypto_generichash },
+    { "sodium_bin2hex", (void*) sodium_bin2hex },
+    { "memset", (void*) memset}
 };
 static const ELFLoaderEnv_t env = { exports, sizeof(exports) / sizeof(*exports) };
 
