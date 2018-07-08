@@ -1,3 +1,5 @@
+#ifndef __ELFLOADER_H__
+#define __ELFLOADER_H__
 #include <stdio.h>
 #include <stdint.h>
 
@@ -33,3 +35,4 @@ void* elfLoaderGetTextAddr(ELFLoaderContext_t *ctx);
 
 
 #define INTERFACE 0
+#endif
