@@ -77,7 +77,7 @@ typedef struct ELFLoaderContext_t ELFLoaderContext_t;
 #else
 
 static const char* TAG = "elfLoader";
-#define MSG(...) ESP_LOGI(TAG,  __VA_ARGS__);
+#define MSG(...) ESP_LOGD(TAG,  __VA_ARGS__);
 #define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
 
 #include "esp_system.h"
