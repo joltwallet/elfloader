@@ -41,7 +41,8 @@
 #ifdef __linux__
 #define LOADER_FD_T FILE *
 #else
-#define LOADER_FD_T void*
+#define LOADER_FD_T FILE *
+//#define LOADER_FD_T void*
 #endif
 
 typedef struct {
@@ -85,8 +86,15 @@ static const char* TAG = "elfLoader";
 #define LOADER_ALLOC_EXEC(size) heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT)
 #define LOADER_ALLOC_DATA(size) heap_caps_malloc(size, MALLOC_CAP_8BIT)
 
+#define CEIL4(x) ((x+3)&~0x03)
+#define LOADER_GETDATA(ctx, off, buffer, size) \
+    if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
+    if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
+
+/*
 #define LOADER_GETDATA(ctx, off, buffer, size) \
 	unalignedCpy(buffer, ctx->fd + off, size);
+*/
 
 #endif
 
@@ -128,10 +136,8 @@ static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h, char *name
         LOADER_GETDATA(ctx, offset, name, name_len);
     }
     return 0;
-#ifdef __linux
 err:
     return -1;
-#endif
 }
 
 static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, size_t nlen) {
@@ -145,10 +151,8 @@ static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name
         return readSection(ctx, sym->st_shndx, &shdr, name, nlen);
     }
     return 0;
-#ifdef __linux
 err:
     return -1;
-#endif
 }
 
 
@@ -368,11 +372,9 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
         }
     }
     return r;
-#ifdef __linux
 err:
     ERR("Error reading relocation data");
     return -1;
-#endif
 }
 
 
@@ -451,18 +453,18 @@ ELFLoaderContext_t* elfLoaderInitLoadAndRelocate(LOADER_FD_T fd, const ELFLoader
                     section->next = ctx->section;
                     ctx->section = section;
                     if (sectHdr.sh_flags & SHF_EXECINSTR) {
-                        section->data = LOADER_ALLOC_EXEC(sectHdr.sh_size);
+                        section->data = LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size));
                     } else {
                         section->data = LOADER_ALLOC_DATA(sectHdr.sh_size);
                     }
                     if (!section->data) {
-                        ERR("Section malloc failled: %s", name);
+                        ERR("Section malloc failed: %s", name);
                         goto err;
                     }
                     section->secIdx = n;
                     section->size = sectHdr.sh_size;
                     if (sectHdr.sh_type != SHT_NOBITS) {
-                        LOADER_GETDATA(ctx, sectHdr.sh_offset, section->data, sectHdr.sh_size);
+                        LOADER_GETDATA(ctx, sectHdr.sh_offset, section->data, CEIL4(sectHdr.sh_size));
                     }
                     if (strcmp(name, ".text") == 0) {
                         ctx->text = section->data;
