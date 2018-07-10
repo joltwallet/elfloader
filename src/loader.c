@@ -549,21 +549,21 @@ int elfLoaderSetFunc(ELFLoaderContext_t *ctx, char* funcname) {
 }
 
 
-int elfLoaderRun(ELFLoaderContext_t *ctx, int arg) {
+int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv) {
     if (!ctx->exec) {
         return 0;
     }
-    typedef int (*func_t)(int);
+    typedef int (*func_t)(int, char**);
     func_t func = (func_t)ctx->exec;
     MSG("Running...");
-    int r = func(arg);
+    int r = func(argc, argv);
     MSG("Result: %08X", r);
     return r;
 }
 
 /* Loads a file_descriptor, environment, function name, and arguments
 */
-int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int arg) {
+int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int argc, char **argv) {
     ELFLoaderContext_t* ctx = elfLoaderInitLoadAndRelocate(fd, env);
     if (!ctx) {
         return -1;
@@ -572,7 +572,7 @@ int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int arg
         elfLoaderFree(ctx);
         return -1;
     }
-    int r = elfLoaderRun(ctx, arg);
+    int r = elfLoaderRun(ctx, argc, argv);
     elfLoaderFree(ctx);
     return r;
 }

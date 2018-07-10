@@ -26,8 +26,8 @@ typedef struct {
 typedef struct ELFLoaderContext_t ELFLoaderContext_t;
 
 
-int elfLoader(LOADER_FD_T fd,const ELFLoaderEnv_t *env,char *funcname,int arg);
-int elfLoaderRun(ELFLoaderContext_t *ctx,int arg);
+int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char *funcname, int argc, char **argv);
+int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv);
 int elfLoaderSetFunc(ELFLoaderContext_t *ctx,char *funcname);
 ELFLoaderContext_t *elfLoaderInitLoadAndRelocate(LOADER_FD_T fd,const ELFLoaderEnv_t *env);
 void elfLoaderFree(ELFLoaderContext_t *ctx);
