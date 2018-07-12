@@ -33,7 +33,6 @@
 #include "elf.h"
 #include "unaligned.h"
 
-
 #if INTERFACE
 #include <stdio.h>
 #include <stdint.h>
@@ -83,10 +82,11 @@ static const char* TAG = "elfLoader";
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+
+#define CEIL4(x) ((x+3)&~0x03)
 #define LOADER_ALLOC_EXEC(size) heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT)
 #define LOADER_ALLOC_DATA(size) heap_caps_malloc(size, MALLOC_CAP_8BIT)
 
-#define CEIL4(x) ((x+3)&~0x03)
 #define LOADER_GETDATA(ctx, off, buffer, size) \
     if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
     if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
@@ -455,7 +455,7 @@ ELFLoaderContext_t* elfLoaderInitLoadAndRelocate(LOADER_FD_T fd, const ELFLoader
                     if (sectHdr.sh_flags & SHF_EXECINSTR) {
                         section->data = LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size));
                     } else {
-                        section->data = LOADER_ALLOC_DATA(sectHdr.sh_size);
+                        section->data = LOADER_ALLOC_DATA(CEIL4(sectHdr.sh_size));
                     }
                     if (!section->data) {
                         ERR("Section malloc failed: %s", name);
