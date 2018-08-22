@@ -351,7 +351,7 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
     for (size_t relCount = 0; relCount < relEntries; relCount++) {
         LOADER_GETDATA(ctx, sectHdr.sh_offset + relCount * (sizeof(rel)), &rel, sizeof(rel))
         Elf32_Sym sym;
-        char name[33] = "<unnamed>";
+        char name[65] = "<unnamed>";
         int symEntry = ELF32_R_SYM(rel.r_info);
         int relType = ELF32_R_TYPE(rel.r_info);
         Elf32_Addr relAddr = ((Elf32_Addr) s->data) + rel.r_offset;		// data to be updated adress
