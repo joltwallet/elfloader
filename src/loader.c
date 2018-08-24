@@ -439,7 +439,6 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
     ctx->shstrtab_offset = section.sh_offset;
     return ctx;
 err:
-    elfLoaderFree(ctx);
     return NULL;
 
 }
@@ -546,7 +545,6 @@ ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
     }
     return ctx;
 err:
-    elfLoaderFree(ctx);
     return NULL;
 }
 
@@ -563,7 +561,6 @@ ELFLoaderContext_t* elfLoaderRelocate(ELFLoaderContext_t *ctx) {
     return ctx;
 
 err:
-    elfLoaderFree(ctx);
     return NULL;
 }
 
@@ -613,22 +610,15 @@ int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv) {
 /* Loads a file_descriptor, environment, function name, and arguments */
 int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int argc, char **argv) {
     ELFLoaderContext_t *ctx;
-    if( NULL == (ctx = elfLoaderInit(fd, env)) ) {
-        return -1;
+    int r;
+    if( NULL != (ctx = elfLoaderInit(fd, &env)) &&
+        NULL != elfLoaderLoad(ctx) &&
+        NULL != elfLoaderRelocate(ctx) &&
+        0 == elfLoaderSetFunc(ctx, funcname) ) {
+        r = -1; goto err;
     }
-    else if( NULL == elfLoaderLoad(ctx) ) {
-        return -1;
-    }
-    else if( NULL == elfLoaderRelocate(ctx) ){
-        return -1;
-    }
-
-    if (elfLoaderSetFunc(ctx, funcname) != 0) {
-        elfLoaderFree(ctx);
-        return -1;
-    }
-
-    int r = elfLoaderRun(ctx, argc, argv);
+    r = elfLoaderRun(ctx, argc, argv);
+err:
     elfLoaderFree(ctx);
     return r;
 }
