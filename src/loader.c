@@ -328,7 +328,7 @@ static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx, Elf32_Sym *sym, const cha
 
 
 static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
-    char name[33] = "<unamed>";
+    char name[65] = "<unamed>";
     Elf32_Shdr sectHdr;
     if (readSection(ctx, s->relSecIdx, &sectHdr, name, sizeof(name)) != 0) {
         ERR("Error reading section header");
