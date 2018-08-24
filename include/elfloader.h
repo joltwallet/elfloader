@@ -29,7 +29,12 @@ typedef struct ELFLoaderContext_t ELFLoaderContext_t;
 int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char *funcname, int argc, char **argv);
 int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv);
 int elfLoaderSetFunc(ELFLoaderContext_t *ctx,char *funcname);
-ELFLoaderContext_t *elfLoaderInitLoadAndRelocate(LOADER_FD_T fd,const ELFLoaderEnv_t *env);
+
+ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env);
+ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx);
+ELFLoaderContext_t* elfLoaderRelocate(ELFLoaderContext_t *ctx);
+
+ELFLoaderContext_t *elfLoaderInitLoadAndRelocate(ELFLoaderContext_t *ctx);
 void elfLoaderFree(ELFLoaderContext_t *ctx);
 void* elfLoaderGetTextAddr(ELFLoaderContext_t *ctx);
 
