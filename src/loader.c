@@ -29,7 +29,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "loader.h"
+#include "elfloader.h"
 #include "elf.h"
 #include "unaligned.h"
 
@@ -126,7 +126,11 @@ struct ELFLoaderContext_t {
 
 /*** Read data functions ***/
 
-
+/* n - Section Index to query
+ * h - Returns Section Header
+ * name - Returns Section Name
+ * name_len - Length of Name buffer
+ */
 static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h, char *name, size_t name_len) {
     off_t offset = ctx->e_shoff + n * sizeof(Elf32_Shdr);
     LOADER_GETDATA(ctx, offset, h, sizeof(Elf32_Shdr));
@@ -397,8 +401,7 @@ void elfLoaderFree(ELFLoaderContext_t* ctx) {
     }
 }
 
-
-ELFLoaderContext_t* elfLoaderInitLoadAndRelocate(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
+ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
     MSG("ENV:");
     for (int i = 0; i < env->exported_size; i++) {
         MSG("  %08X %s", (unsigned int) env->exported[i].ptr, env->exported[i].name);
@@ -410,105 +413,114 @@ ELFLoaderContext_t* elfLoaderInitLoadAndRelocate(LOADER_FD_T fd, const ELFLoader
     memset(ctx, 0, sizeof(ELFLoaderContext_t));
     ctx->fd = fd;
     ctx->env = env;
-    {
-        Elf32_Ehdr header;
-        Elf32_Shdr section;
-        /* Load the ELF header, located at the start of the buffer. */
-        LOADER_GETDATA(ctx, 0, &header, sizeof(Elf32_Ehdr));
+    Elf32_Ehdr header;
+    Elf32_Shdr section;
+    /* Load the ELF header, located at the start of the buffer. */
+    LOADER_GETDATA(ctx, 0, &header, sizeof(Elf32_Ehdr));
 
-        /* Make sure that we have a correct and compatible ELF header. */
-        char ElfMagic[] = { 0x7f, 'E', 'L', 'F', '\0' };
-        if (memcmp(header.e_ident, ElfMagic, strlen(ElfMagic)) != 0) {
-            ERR("Bad ELF Identification");
-            goto err;
-        }
-
-        /* Load the section header, get the number of entries of the section header, get a pointer to the actual table of strings */
-        LOADER_GETDATA(ctx, header.e_shoff + header.e_shstrndx * sizeof(Elf32_Shdr), &section, sizeof(Elf32_Shdr));
-        ctx->e_shnum = header.e_shnum;
-        ctx->e_shoff = header.e_shoff;
-        ctx->shstrtab_offset = section.sh_offset;
+    /* Make sure that we have a correct and compatible ELF header. */
+    char ElfMagic[] = { 0x7f, 'E', 'L', 'F', '\0' };
+    if (memcmp(header.e_ident, ElfMagic, strlen(ElfMagic)) != 0) {
+        ERR("Bad ELF Identification");
+        goto err;
     }
 
-    {
-        /* Go through all sections, allocate and copy the relevant ones
-        ".symtab": segment contains the symbol table for this file
-        ".strtab": segment points to the actual string names used by the symbol table
-        */
-        MSG("Scanning ELF sections         relAddr      size");
-        for (int n = 1; n < ctx->e_shnum; n++) {
-            Elf32_Shdr sectHdr;
-            char name[33] = "<unamed>";
-            if (readSection(ctx, n, &sectHdr, name, sizeof(name)) != 0) {
-                ERR("Error reading section");
-                goto err;
-            }
-            if (sectHdr.sh_flags & SHF_ALLOC) {
-                if (!sectHdr.sh_size) {
-                    MSG("  section %2d: %-15s no data", n, name);
+    /* Load the section header, get the number of entries of the section header,
+     * get a pointer to the actual table of strings */
+    LOADER_GETDATA(ctx, header.e_shoff + header.e_shstrndx * sizeof(Elf32_Shdr),
+            &section, sizeof(Elf32_Shdr));
+    ctx->e_shnum = header.e_shnum;
+    ctx->e_shoff = header.e_shoff;
+    ctx->shstrtab_offset = section.sh_offset;
+    return ctx;
+err:
+    elfLoaderFree(ctx);
+    return NULL;
+
+}
+
+ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
+    /* Go through all sections, allocate and copy the relevant ones
+    ".symtab": segment contains the symbol table for this file
+    ".strtab": segment points to the actual string names used by the symbol table
+    */
+    MSG("Scanning ELF sections         relAddr      size");
+    for (int n = 1; n < ctx->e_shnum; n++) {
+        Elf32_Shdr sectHdr;
+        char name[33] = "<unamed>";
+        if (readSection(ctx, n, &sectHdr, name, sizeof(name)) != 0) {
+            ERR("Error reading section");
+            goto err;
+        }
+        if (sectHdr.sh_flags & SHF_ALLOC) {
+            if (!sectHdr.sh_size) {
+                MSG("  section %2d: %-15s no data", n, name);
+            } else {
+                ELFLoaderSection_t* section = malloc(sizeof(ELFLoaderSection_t));
+                assert(section);
+                memset(section, 0, sizeof(ELFLoaderSection_t));
+                section->next = ctx->section;
+                ctx->section = section;
+                if (sectHdr.sh_flags & SHF_EXECINSTR) {
+                    section->data = LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size));
                 } else {
-                    ELFLoaderSection_t* section = malloc(sizeof(ELFLoaderSection_t));
-                    assert(section);
-                    memset(section, 0, sizeof(ELFLoaderSection_t));
-                    section->next = ctx->section;
-                    ctx->section = section;
-                    if (sectHdr.sh_flags & SHF_EXECINSTR) {
-                        section->data = LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size));
-                    } else {
-                        section->data = LOADER_ALLOC_DATA(CEIL4(sectHdr.sh_size));
-                    }
-                    if (!section->data) {
-                        ERR("Section malloc failed: %s", name);
-                        goto err;
-                    }
-                    section->secIdx = n;
-                    section->size = sectHdr.sh_size;
-                    if (sectHdr.sh_type != SHT_NOBITS) {
-                        LOADER_GETDATA(ctx, sectHdr.sh_offset, section->data, CEIL4(sectHdr.sh_size));
-                    }
-                    if (strcmp(name, ".text") == 0) {
-                        ctx->text = section->data;
-                    }
-                    MSG("  section %2d: %-15s %08X %6i", n, name, (unsigned int) section->data, sectHdr.sh_size);
+                    section->data = LOADER_ALLOC_DATA(CEIL4(sectHdr.sh_size));
                 }
-            } else if (sectHdr.sh_type == SHT_RELA) {
-                if (sectHdr.sh_info >= n) {
-                    ERR("Rela section: bad linked section (%i:%s -> %i)", n, name, sectHdr.sh_info);
+                if (!section->data) {
+                    ERR("Section malloc failed: %s", name);
                     goto err;
                 }
-                ELFLoaderSection_t* section = findSection(ctx, sectHdr.sh_info);
-                if (section == NULL) {
-                    MSG("  section %2d: %-15s -> %2d: ignoring", n, name, sectHdr.sh_info);
-                } else {
-                    section->relSecIdx = n;
-                    MSG("  section %2d: %-15s -> %2d: ok", n, name, sectHdr.sh_info);
+                section->secIdx = n;
+                section->size = sectHdr.sh_size;
+                if (sectHdr.sh_type != SHT_NOBITS) {
+                    LOADER_GETDATA(ctx, sectHdr.sh_offset, section->data, CEIL4(sectHdr.sh_size));
                 }
+                if (strcmp(name, ".text") == 0) {
+                    ctx->text = section->data;
+                }
+                MSG("  section %2d: %-15s %08X %6i", n, name, (unsigned int) section->data, sectHdr.sh_size);
+            }
+        } else if (sectHdr.sh_type == SHT_RELA) {
+            if (sectHdr.sh_info >= n) {
+                ERR("Rela section: bad linked section (%i:%s -> %i)", n, name, sectHdr.sh_info);
+                goto err;
+            }
+            ELFLoaderSection_t* section = findSection(ctx, sectHdr.sh_info);
+            if (section == NULL) {
+                MSG("  section %2d: %-15s -> %2d: ignoring", n, name, sectHdr.sh_info);
             } else {
-                MSG("  section %2d: %s", n, name);
-                if (strcmp(name, ".symtab") == 0) {
-                    ctx->symtab_offset = sectHdr.sh_offset;
-                    ctx->symtab_count = sectHdr.sh_size / sizeof(Elf32_Sym);
-                } else if (strcmp(name, ".strtab") == 0) {
-                    ctx->strtab_offset = sectHdr.sh_offset;
-                }
+                section->relSecIdx = n;
+                MSG("  section %2d: %-15s -> %2d: ok", n, name, sectHdr.sh_info);
+            }
+        } else {
+            MSG("  section %2d: %s", n, name);
+            if (strcmp(name, ".symtab") == 0) {
+                ctx->symtab_offset = sectHdr.sh_offset;
+                ctx->symtab_count = sectHdr.sh_size / sizeof(Elf32_Sym);
+            } else if (strcmp(name, ".strtab") == 0) {
+                ctx->strtab_offset = sectHdr.sh_offset;
             }
         }
-        if (ctx->symtab_offset == 0 || ctx->symtab_offset == 0) {
-            ERR("Missing .symtab or .strtab section");
-            goto err;
-        }
     }
+    if (ctx->symtab_offset == 0 || ctx->symtab_offset == 0) {
+        ERR("Missing .symtab or .strtab section");
+        goto err;
+    }
+    return ctx;
+err:
+    elfLoaderFree(ctx);
+    return NULL;
+}
 
-    {
-        MSG("Relocating sections");
-        int r = 0;
-        for (ELFLoaderSection_t* section = ctx->section; section != NULL; section = section->next) {
-            r |= relocateSection(ctx, section);
-        }
-        if (r != 0) {
-            MSG("Relocation failed");
-            goto err;
-        }
+ELFLoaderContext_t* elfLoaderRelocate(ELFLoaderContext_t *ctx) {
+    MSG("Relocating sections");
+    int r = 0;
+    for (ELFLoaderSection_t* section = ctx->section; section != NULL; section = section->next) {
+        r |= relocateSection(ctx, section);
+    }
+    if (r != 0) {
+        MSG("Relocation failed");
+        goto err;
     }
     return ctx;
 
@@ -548,7 +560,6 @@ int elfLoaderSetFunc(ELFLoaderContext_t *ctx, char* funcname) {
     return 0;
 }
 
-
 int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv) {
     if (!ctx->exec) {
         return 0;
@@ -561,17 +572,24 @@ int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv) {
     return r;
 }
 
-/* Loads a file_descriptor, environment, function name, and arguments
-*/
+/* Loads a file_descriptor, environment, function name, and arguments */
 int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int argc, char **argv) {
-    ELFLoaderContext_t* ctx = elfLoaderInitLoadAndRelocate(fd, env);
-    if (!ctx) {
+    ELFLoaderContext_t *ctx;
+    if( NULL == (ctx = elfLoaderInit(fd, env)) ) {
         return -1;
     }
+    else if( NULL == elfLoaderLoad(ctx) ) {
+        return -1;
+    }
+    else if( NULL == elfLoaderRelocate(ctx) ){
+        return -1;
+    }
+
     if (elfLoaderSetFunc(ctx, funcname) != 0) {
         elfLoaderFree(ctx);
         return -1;
     }
+
     int r = elfLoaderRun(ctx, argc, argv);
     elfLoaderFree(ctx);
     return r;
