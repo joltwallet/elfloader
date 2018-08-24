@@ -126,7 +126,8 @@ struct ELFLoaderContext_t {
 
 /*** Read data functions ***/
 
-/* n - Section Index to query
+/* Reads section header and name for given section index
+ * n - Section Index to query
  * h - Returns Section Header
  * name - Returns Section Name
  * name_len - Length of Name buffer
@@ -401,6 +402,10 @@ void elfLoaderFree(ELFLoaderContext_t* ctx) {
     }
 }
 
+/* Reads and verify the ELF Header;
+ * Loads all the section headers;
+ * finds table of strings
+ */
 ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
     MSG("ENV:");
     for (int i = 0; i < env->exported_size; i++) {
@@ -437,6 +442,39 @@ err:
     elfLoaderFree(ctx);
     return NULL;
 
+}
+
+/* user has to remember to free allocated content buffer */
+void *elfLoaderLoadSectionByName(const ELFLoaderContext_t *ctx, const char *target ) {
+    for (int n = 1; n < ctx->e_shnum; n++) {
+        Elf32_Shdr sectHdr;
+        char name[33] = "<unamed>";
+        if (readSection(ctx, n, &sectHdr, name, sizeof(name)) != 0) {
+            ERR("Error reading section");
+            //goto err;
+        }
+        if( 0 == strcmp(name, target) ) {
+            // Read contents
+            printf("Found cointype!");
+            void *data;
+            if (sectHdr.sh_flags & SHF_EXECINSTR) {
+                data = LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size));
+            } else {
+                data = LOADER_ALLOC_DATA(CEIL4(sectHdr.sh_size));
+            }
+            if (!data) {
+                ERR("Section malloc failed: %s", name);
+                goto err;
+            }
+            if (sectHdr.sh_type != SHT_NOBITS) {
+                LOADER_GETDATA(ctx, sectHdr.sh_offset, data,
+                        CEIL4(sectHdr.sh_size));
+            }
+            return data;
+        }
+    }
+err:
+    return NULL;
 }
 
 ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
