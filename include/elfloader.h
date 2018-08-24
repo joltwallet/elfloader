@@ -39,5 +39,6 @@ void elfLoaderFree(ELFLoaderContext_t *ctx);
 void* elfLoaderGetTextAddr(ELFLoaderContext_t *ctx);
 
 
+void *elfLoaderLoadSectionByName(const ELFLoaderContext_t *ctx, const char *name );
 #define INTERFACE 0
 #endif
