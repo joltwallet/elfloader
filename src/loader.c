@@ -160,6 +160,18 @@ err:
     return -1;
 }
 
+/* Only reads functions; speeds up setting entrypoint */
+static int readSymbolFunc(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, size_t nlen) {
+    off_t pos = ctx->symtab_offset + n * sizeof(Elf32_Sym);
+    LOADER_GETDATA(ctx, pos, sym, sizeof(Elf32_Sym))
+    if( STT_FUNC == ELF32_ST_TYPE(sym->st_info) && sym->st_name ) {
+        off_t offset = ctx->strtab_offset + sym->st_name;
+        LOADER_GETDATA(ctx, offset, name, nlen);
+    }
+    return 0;
+err:
+    return -1;
+}
 
 /*** Relocation functions ***/
 
@@ -581,15 +593,15 @@ err:
     return NULL;
 }
 
-
 int elfLoaderSetFunc(ELFLoaderContext_t *ctx, char* funcname) {
     ctx->exec = 0;
     MSG("Scanning ELF symbols");
     MSG("  Sym  Symbol                         sect value    size relAddr");
-    for (int symCount = 0; symCount < ctx->symtab_count; symCount++) {
+    // Start from the end because it'll probably be closer
+    for (int symCount = ctx->symtab_count - 1; symCount >= 0; symCount--) {
         Elf32_Sym sym;
         char name[33] = "<unnamed>";
-        if (readSymbol(ctx, symCount, &sym, name, sizeof(name)) != 0) {
+        if (readSymbolFunc(ctx, symCount, &sym, name, sizeof(name)) != 0) {
             ERR("Error reading symbol");
             return -1;
         }
@@ -600,6 +612,7 @@ int elfLoaderSetFunc(ELFLoaderContext_t *ctx, char* funcname) {
             } else {
                 ctx->exec = (void*)symAddr;
                 MSG("  %04X %-30s %04X %08X %04X %08X", symCount, name, sym.st_shndx, sym.st_value, sym.st_size, symAddr);
+                break;
             }
         } else {
             MSG("  %04X %-30s %04X %08X %04X", symCount, name, sym.st_shndx, sym.st_value, sym.st_size);
