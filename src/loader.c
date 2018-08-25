@@ -324,7 +324,7 @@ static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx, Elf32_Sym *sym, const cha
         // Binary search for symbol
         int first, middle, last, res;
         first = 0;
-        last = ctx->env->exported_size;
+        last = ctx->env->exported_size - 1;
         middle = (first + last)/2;
         while (first <= last) {
             res = strcmp(sName, ctx->env->exported[middle].name);
