@@ -613,10 +613,10 @@ int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv) {
 int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int argc, char **argv) {
     ELFLoaderContext_t *ctx;
     int r;
-    if( NULL != (ctx = elfLoaderInit(fd, &env)) &&
-        NULL != elfLoaderLoad(ctx) &&
-        NULL != elfLoaderRelocate(ctx) &&
-        0 == elfLoaderSetFunc(ctx, funcname) ) {
+    if( NULL == (ctx = elfLoaderInit(fd, &env)) ||
+        NULL == elfLoaderLoad(ctx) ||
+        NULL == elfLoaderRelocate(ctx) ||
+        0 != elfLoaderSetFunc(ctx, funcname) ) {
         r = -1; goto err;
     }
     r = elfLoaderRun(ctx, argc, argv);
