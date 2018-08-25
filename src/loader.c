@@ -444,7 +444,7 @@ err:
 }
 
 /* user has to remember to free allocated content buffer */
-void *elfLoaderLoadSectionByName(const ELFLoaderContext_t *ctx, const char *target ) {
+void *elfLoaderLoadSectionByName(const ELFLoaderContext_t *ctx, const char *target, size_t *data_len ) {
     for (int n = 1; n < ctx->e_shnum; n++) {
         Elf32_Shdr sectHdr;
         char name[33] = "<unamed>";
@@ -454,7 +454,9 @@ void *elfLoaderLoadSectionByName(const ELFLoaderContext_t *ctx, const char *targ
         }
         if( 0 == strcmp(name, target) ) {
             // Read contents
-            printf("Found cointype!");
+            if( NULL != data_len ) {
+                *data_len = sectHdr.sh_size;
+            }
             void *data;
             if (sectHdr.sh_flags & SHF_EXECINSTR) {
                 data = LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size));
@@ -611,7 +613,6 @@ int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv) {
 int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int argc, char **argv) {
     ELFLoaderContext_t *ctx;
     int r;
-<<<<<<< HEAD
     if( NULL != (ctx = elfLoaderInit(fd, &env)) &&
         NULL != elfLoaderLoad(ctx) &&
         NULL != elfLoaderRelocate(ctx) &&
