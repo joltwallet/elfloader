@@ -320,9 +320,24 @@ static ELFLoaderSection_t *findSection(ELFLoaderContext_t* ctx, int index) {
 
 
 static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx, Elf32_Sym *sym, const char *sName) {
-    for (int i = 0; i < ctx->env->exported_size; i++) {
-        if (strcmp(ctx->env->exported[i].name, sName) == 0) {
-            return (Elf32_Addr)(ctx->env->exported[i].ptr);
+    {
+        // Binary search for symbol
+        int first, middle, last, res;
+        first = 0;
+        last = ctx->env->exported_size;
+        middle = (first + last)/2;
+        while (first <= last) {
+            res = strcmp(sName, ctx->env->exported[middle].name);
+            if(res < 0) {
+                last = middle - 1;
+            }
+            else if(res > 0){
+                first = middle + 1;
+            }
+            else {
+                return (Elf32_Addr)(ctx->env->exported[middle].ptr);
+            }
+            middle = (first + last)/2;
         }
     }
     ELFLoaderSection_t *symSec = findSection(ctx, sym->st_shndx);
