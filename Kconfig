@@ -1,0 +1,18 @@
+menu "ELF Loader"
+
+choice
+    prompt "Select ELF Loading Method"
+    default ELFLOADER_MEMORY_POINTER
+    config ELFLOADER_POSIX
+        bool "Use file descriptors and operations like fread()"
+        help
+            Operates directly out of flash using POSIX.
+    config ELFLOADER_MEMORY_POINTER
+        bool "Operate on memory pointers"
+        help
+            Reader reads entire ELF file into memory and passes in a pointer
+            to the beginning of the contents. 1~2 orders of magnitude faster
+            than POSIX, but requires more RAM.
+endchoice
+
+endmenu

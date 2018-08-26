@@ -37,12 +37,11 @@
 #include <stdio.h>
 #include <stdint.h>
 
-#ifdef __linux__
+#ifdef __linux__ || CONFIG_ELFLOADER_POSIX
 #define LOADER_FD_T FILE *
 #else
-#define LOADER_FD_T FILE *
-//#define LOADER_FD_T void*
-#endif
+#define LOADER_FD_T void*
+#endif //__linux__
 
 typedef struct {
     const char *name; /*!< Name of symbol */
@@ -56,7 +55,7 @@ typedef struct {
 
 typedef struct ELFLoaderContext_t ELFLoaderContext_t;
 
-#endif
+#endif // INTERFACE
 
 
 #ifdef __linux__
@@ -73,9 +72,10 @@ typedef struct ELFLoaderContext_t ELFLoaderContext_t;
     if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
     if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
 
-#else
+#elif ESP_PLATFORM
 
 static const char* TAG = "elfLoader";
+
 #define MSG(...) ESP_LOGD(TAG,  __VA_ARGS__);
 #define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
 
@@ -87,14 +87,16 @@ static const char* TAG = "elfLoader";
 #define LOADER_ALLOC_EXEC(size) heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT)
 #define LOADER_ALLOC_DATA(size) heap_caps_malloc(size, MALLOC_CAP_8BIT)
 
+#if CONFIG_ELFLOADER_POSIX
+// Works with filesystem, but is quite slow
 #define LOADER_GETDATA(ctx, off, buffer, size) \
     if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
     if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
-
-/*
+#elif CONFIG_ELFLOADER_MEMORY_POINTER
+// operate directly on memory, much faster
 #define LOADER_GETDATA(ctx, off, buffer, size) \
-	unalignedCpy(buffer, ctx->fd + off, size);
-*/
+        unalignedCpy(buffer, ctx->fd + off, size); if(0) goto err;
+#endif
 
 #endif
 
@@ -132,11 +134,12 @@ struct ELFLoaderContext_t {
  * name - Returns Section Name
  * name_len - Length of Name buffer
  */
-static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h, char *name, size_t name_len) {
+static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h, char *name, const size_t name_len) {
     off_t offset = ctx->e_shoff + n * sizeof(Elf32_Shdr);
     LOADER_GETDATA(ctx, offset, h, sizeof(Elf32_Shdr));
 
     if (h->sh_name) {
+        // Read Section Name
         offset = ctx->shstrtab_offset + h->sh_name;
         LOADER_GETDATA(ctx, offset, name, name_len);
     }
@@ -145,10 +148,12 @@ err:
     return -1;
 }
 
-static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, size_t nlen) {
+/* Populates sym, name */
+static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, const size_t nlen) {
     off_t pos = ctx->symtab_offset + n * sizeof(Elf32_Sym);
     LOADER_GETDATA(ctx, pos, sym, sizeof(Elf32_Sym))
     if (sym->st_name) {
+        // Read in Name of Symbol from the strtab index
         off_t offset = ctx->strtab_offset + sym->st_name;
         LOADER_GETDATA(ctx, offset, name, nlen);
     } else {
@@ -161,7 +166,7 @@ err:
 }
 
 /* Only reads functions; speeds up setting entrypoint */
-static int readSymbolFunc(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, size_t nlen) {
+static int readSymbolFunc(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, const size_t nlen) {
     off_t pos = ctx->symtab_offset + n * sizeof(Elf32_Sym);
     LOADER_GETDATA(ctx, pos, sym, sizeof(Elf32_Sym))
     if( STT_FUNC == ELF32_ST_TYPE(sym->st_info) && sym->st_name ) {
@@ -360,7 +365,7 @@ static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx, Elf32_Sym *sym, const cha
 
 
 static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
-    char name[65] = "<unamed>";
+    char name[32] = "<unamed>";
     Elf32_Shdr sectHdr;
     if (readSection(ctx, s->relSecIdx, &sectHdr, name, sizeof(name)) != 0) {
         ERR("Error reading section header");
@@ -374,7 +379,6 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
         ERR("Section not loaded: %s", name);
         return -1;
     }
-
     MSG("  Section %s", name);
     int r = 0;
     Elf32_Rela rel;
@@ -388,7 +392,7 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
         int relType = ELF32_R_TYPE(rel.r_info);
         Elf32_Addr relAddr = ((Elf32_Addr) s->data) + rel.r_offset;		// data to be updated adress
         readSymbol(ctx, symEntry, &sym, name, sizeof(name));
-        Elf32_Addr symAddr = findSymAddr(ctx, &sym, name) + rel.r_addend;								// target symbol adress
+        Elf32_Addr symAddr = findSymAddr(ctx, &sym, name) + rel.r_addend; // target symbol adress
         uint32_t from, to;
         if (relType == R_XTENSA_NONE || relType == R_XTENSA_ASM_EXPAND) {
 //            MSG("  %08X %04X %04X %-20s %08X          %08X                    %s + %X", rel.r_offset, symEntry, relType, type2String(relType), relAddr, sym.st_value, name, rel.r_addend);
