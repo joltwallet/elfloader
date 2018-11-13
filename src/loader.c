@@ -817,7 +817,7 @@ ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
             }
         }
     }
-    if (ctx->symtab_offset == 0 || ctx->symtab_offset == 0) {
+    if (ctx->symtab_offset == 0 || ctx->strtab_offset == 0) {
         ERR("Missing .symtab or .strtab section");
         goto err;
     }
