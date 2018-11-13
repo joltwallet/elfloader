@@ -15,4 +15,26 @@ choice
             than POSIX, but requires more RAM.
 endchoice
 
+choice
+    prompt "Symbol Search Method"
+    default ELFLOADER_SEARCH_LINEAR
+    config ELFLOADER_SEARCH_LINEAR
+        bool "Linear search through exported symbols"
+        help
+            Input symbols from HOST can be in any order, but takes O(n) to find
+            a symbol.
+    config ELFLOADER_SEARCH_BINARY
+        bool "Binary search through exported symbols"
+        help
+            Input symbols from HOST must be in alphabetical order.
+            Takes O(log(n)) to find a symbol.
+endchoice
+
+    config ELFLOADER_PROFILER_EN
+        bool
+        prompt "Enable ELF Loader Profiling"
+        default n
+        help
+            Enable profiling tools.
+
 endmenu

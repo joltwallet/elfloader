@@ -29,6 +29,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#if CONFIG_ELFLOADER_PROFILER_EN
+#include <esp_timer.h> // profiling
+#endif
+
 #include "elfloader.h"
 #include "elf.h"
 #include "unaligned.h"
@@ -41,7 +45,7 @@
 #define LOADER_FD_T FILE *
 #else
 #define LOADER_FD_T void*
-#endif //__linux__
+#endif
 
 typedef struct {
     const char *name; /*!< Name of symbol */
@@ -74,14 +78,15 @@ typedef struct ELFLoaderContext_t ELFLoaderContext_t;
 
 #elif ESP_PLATFORM
 
-static const char* TAG = "elfLoader";
-
-#define MSG(...) ESP_LOGD(TAG,  __VA_ARGS__);
-#define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
-
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+
+static const char* TAG = "elfLoader";
+
+#define MSG(...) ESP_LOGI(TAG,  __VA_ARGS__);
+#define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
+
 
 #define CEIL4(x) ((x+3)&~0x03)
 #define LOADER_ALLOC_EXEC(size) heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT)
@@ -104,8 +109,8 @@ typedef struct ELFLoaderSection_t {
     void *data;
     int secIdx;
     size_t size;
-    off_t relSecIdx;
-    struct ELFLoaderSection_t* next;
+    off_t relSecIdx;                 // 
+    struct ELFLoaderSection_t* next; // Next Header in Singly Linked List
 } ELFLoaderSection_t;
 
 struct ELFLoaderContext_t {
@@ -116,15 +121,79 @@ struct ELFLoaderContext_t {
 
     size_t e_shnum;
     off_t e_shoff;
-    off_t shstrtab_offset;
 
     size_t symtab_count;
     off_t symtab_offset;
     off_t strtab_offset;
+#if CONFIG_ELFLOADER_POSIX
+    char *shstrtab; // for caching the section header string table
+#else
+    off_t shstrtab_offset;
+#endif
 
-    ELFLoaderSection_t* section;
+    ELFLoaderSection_t* section; // First element of singly linked list sections.
 };
 
+/* Profiler Variables */
+#if CONFIG_ELFLOADER_PROFILER_EN
+typedef struct profiler_timer_t{
+    int64_t t;
+    bool running;
+} profiler_timer_t;
+
+static profiler_timer_t profiler_readSection = { 0 };
+static profiler_timer_t profiler_readSymbol = { 0 };
+static profiler_timer_t profiler_readSymbolFunc = { 0 };
+static profiler_timer_t profiler_relocateSymbol = { 0 };
+static profiler_timer_t profiler_findSymAddr = { 0 };
+static profiler_timer_t profiler_findSection = { 0 };
+static profiler_timer_t profiler_relocateSection = { 0 };
+
+#define PROFILER_START(x) \
+    if(!x.running) { \
+        x.running = true; \
+        x.t -= esp_timer_get_time(); \
+    }
+#define PROFILER_STOP(x) \
+    if(x.running) { \
+        x.running = false; \
+        x.t += esp_timer_get_time(); \
+    }
+
+#define PROFILER_START_READSECTION     PROFILER_START(profiler_readSection)
+#define PROFILER_START_READSYMBOL      PROFILER_START(profiler_readSymbol)
+#define PROFILER_START_READSYMBOLFUNC  PROFILER_START(profiler_readSymbolFunc)
+#define PROFILER_START_RELOCATESYMBOL  PROFILER_START(profiler_relocateSymbol)
+#define PROFILER_START_FINDSYMADDR     PROFILER_START(profiler_findSymAddr)
+#define PROFILER_START_FINDSECTION     PROFILER_START(profiler_findSection)
+#define PROFILER_START_RELOCATESECTION PROFILER_START(profiler_relocateSection)
+
+#define PROFILER_STOP_READSECTION     PROFILER_STOP(profiler_readSection)
+#define PROFILER_STOP_READSYMBOL      PROFILER_STOP(profiler_readSymbol)
+#define PROFILER_STOP_READSYMBOLFUNC  PROFILER_STOP(profiler_readSymbolFunc)
+#define PROFILER_STOP_RELOCATESYMBOL  PROFILER_STOP(profiler_relocateSymbol)
+#define PROFILER_STOP_FINDSYMADDR     PROFILER_STOP(profiler_findSymAddr)
+#define PROFILER_STOP_FINDSECTION     PROFILER_STOP(profiler_findSection)
+#define PROFILER_STOP_RELOCATESECTION PROFILER_STOP(profiler_relocateSection)
+
+#else
+// dummy macros
+
+#define PROFILER_START_READSECTION
+#define PROFILER_START_READSYMBOL
+#define PROFILER_START_READSYMBOLFUNC
+#define PROFILER_START_RELOCATESYMBOL 
+#define PROFILER_START_FINDSYMADDR 
+#define PROFILER_START_RELOCATESECTION 
+
+#define PROFILER_STOP_READSECTION
+#define PROFILER_STOP_READSYMBOL
+#define PROFILER_STOP_READSYMBOLFUNC
+#define PROFILER_STOP_RELOCATESYMBOL 
+#define PROFILER_STOP_FINDSYMADDR 
+#define PROFILER_STOP_RELOCATESECTION 
+
+#endif
 
 /*** Read data functions ***/
 
@@ -134,47 +203,80 @@ struct ELFLoaderContext_t {
  * name - Returns Section Name
  * name_len - Length of Name buffer
  */
-static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h, char *name, const size_t name_len) {
-    off_t offset = ctx->e_shoff + n * sizeof(Elf32_Shdr);
-    LOADER_GETDATA(ctx, offset, h, sizeof(Elf32_Shdr));
+static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h,
+        char *name, const size_t name_len) {
+    PROFILER_START_READSECTION;
 
-    if (h->sh_name) {
-        // Read Section Name
+    off_t offset;
+
+    /* Read Section Header */
+    if( h != NULL ) {
+        offset = ctx->e_shoff + n * sizeof(Elf32_Shdr);
+        LOADER_GETDATA(ctx, offset, h, sizeof(Elf32_Shdr));
+    }
+
+    /* Read Section Name */
+    if (NULL != name && h->sh_name) {
+        // h->sh_name is the offset into the StringTable where the 
+        // NULL-terminated string is located.
+#if CONFIG_ELFLOADER_POSIX
+        strlcpy(name, ctx->shstrtab, name_len);
+#else
         offset = ctx->shstrtab_offset + h->sh_name;
         LOADER_GETDATA(ctx, offset, name, name_len);
+#endif
     }
+
+    PROFILER_STOP_READSECTION;
     return 0;
+
 err:
+    PROFILER_STOP_READSECTION;
     return -1;
 }
 
 /* Populates sym, name */
-static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, const size_t nlen) {
+static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym,
+        char *name, const size_t nlen) {
+    PROFILER_START_READSYMBOL;
+
     off_t pos = ctx->symtab_offset + n * sizeof(Elf32_Sym);
     LOADER_GETDATA(ctx, pos, sym, sizeof(Elf32_Sym))
     if (sym->st_name) {
         // Read in Name of Symbol from the strtab index
         off_t offset = ctx->strtab_offset + sym->st_name;
         LOADER_GETDATA(ctx, offset, name, nlen);
-    } else {
+    } 
+    else {
         Elf32_Shdr shdr;
+        PROFILER_STOP_READSYMBOL;
         return readSection(ctx, sym->st_shndx, &shdr, name, nlen);
     }
+
+    PROFILER_STOP_READSYMBOL;
     return 0;
+
 err:
+    PROFILER_STOP_READSYMBOL;
     return -1;
 }
 
 /* Only reads functions; speeds up setting entrypoint */
-static int readSymbolFunc(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym, char *name, const size_t nlen) {
+static int readSymbolFunc(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym,
+        char *name, const size_t nlen) {
+    PROFILER_START_READSYMBOLFUNC;
+
     off_t pos = ctx->symtab_offset + n * sizeof(Elf32_Sym);
     LOADER_GETDATA(ctx, pos, sym, sizeof(Elf32_Sym))
     if( STT_FUNC == ELF32_ST_TYPE(sym->st_info) && sym->st_name ) {
         off_t offset = ctx->strtab_offset + sym->st_name;
         LOADER_GETDATA(ctx, offset, name, nlen);
     }
+
+    PROFILER_STOP_READSYMBOLFUNC;
     return 0;
 err:
+    PROFILER_STOP_READSYMBOLFUNC;
     return -1;
 }
 
@@ -195,148 +297,177 @@ static const char *type2String(int symt) {
 }
 
 
-static int relocateSymbol(Elf32_Addr relAddr, int type, Elf32_Addr symAddr, Elf32_Addr defAddr, uint32_t* from, uint32_t* to) {
+static int relocateSymbol(Elf32_Addr relAddr, int type, Elf32_Addr symAddr,
+        Elf32_Addr defAddr, uint32_t* from, uint32_t* to) {
+
+    PROFILER_START_RELOCATESYMBOL;
+
     if (symAddr == 0xffffffff) {
         if (defAddr == 0x00000000) {
             ERR("Relocation: undefined symAddr");
-            return -1;
+            goto err;
         } else {
             symAddr = defAddr;
         }
     }
     switch (type) {
-    case R_XTENSA_32: {
-        *from = unalignedGet32((void*)relAddr);
-        *to  = symAddr + *from;
-        unalignedSet32((void*)relAddr, *to);
-        break;
+        case R_XTENSA_32: {
+            *from = unalignedGet32((void*)relAddr);
+            *to  = symAddr + *from;
+            unalignedSet32((void*)relAddr, *to);
+            break;
+        }
+        case R_XTENSA_SLOT0_OP: {
+            uint32_t v = unalignedGet32((void*)relAddr);
+            *from = v;
+
+            /* *** Format: L32R *** */
+            if ((v & 0x00000F) == 0x000001) {
+                int32_t delta =  symAddr - ((relAddr + 3) & 0xfffffffc);
+                if (delta & 0x0000003) {
+                    ERR("Relocation: L32R error");
+                    goto err;
+                }
+                delta =  delta >> 2;
+                unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[0]);
+                unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[1]);
+                *to = unalignedGet32((void*)relAddr);
+                break;
+            }
+
+            /* *** Format: CALL *** */
+            /* *** CALL0, CALL4, CALL8, CALL12, J *** */
+            if ((v & 0x00000F) == 0x000005) {
+                int32_t delta =  symAddr - ((relAddr + 4) & 0xfffffffc);
+                if (delta & 0x0000003) {
+                    ERR("Relocation: CALL error");
+                    return -1;
+                }
+                delta =  delta >> 2;
+                delta =  delta << 6;
+                delta |= unalignedGet8((void*)(relAddr + 0));
+                unalignedSet8((void*)(relAddr + 0), ((uint8_t*)&delta)[0]);
+                unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[1]);
+                unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[2]);
+                *to = unalignedGet32((void*)relAddr);
+                break;
+            }
+
+            /* *** J *** */
+            if ((v & 0x00003F) == 0x000006) {
+                int32_t delta =  symAddr - (relAddr + 4);
+                delta =  delta << 6;
+                delta |= unalignedGet8((void*)(relAddr + 0));
+                unalignedSet8((void*)(relAddr + 0), ((uint8_t*)&delta)[0]);
+                unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[1]);
+                unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[2]);
+                *to = unalignedGet32((void*)relAddr);
+                break;
+            }
+
+            /* *** Format: BRI8  *** */
+            /* *** BALL, BANY, BBC, BBCI, BBCI.L, BBS,  BBSI, BBSI.L, BEQ,
+             * *** BGE,  BGEU, BLT, BLTU, BNALL, BNE,  BNONE, LOOP, 
+             * *** BEQI, BF, BGEI, BGEUI, BLTI, BLTUI, BNEI,  BT, LOOPGTZ,
+             * *** LOOPNEZ *** */
+            if (((v & 0x00000F) == 0x000007) || ((v & 0x00003F) == 0x000026) ||  ((v & 0x00003F) == 0x000036 && (v & 0x0000FF) != 0x000036)) {
+                int32_t delta =  symAddr - (relAddr + 4);
+                unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[0]);
+                *to = unalignedGet32((void*)relAddr);
+                if ((delta < - (1 << 7)) || (delta >= (1 << 7))) {
+                    ERR("Relocation: BRI8 out of range");
+                    goto err;
+                }
+                break;
+            }
+
+            /* *** Format: BRI12 *** */
+            /* *** BEQZ, BGEZ, BLTZ, BNEZ *** */
+            if ((v & 0x00003F) == 0x000016) {
+                int32_t delta =  symAddr - (relAddr + 4);
+                delta =  delta << 4;
+                delta |=  unalignedGet32((void*)(relAddr + 1));
+                unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[0]);
+                unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[1]);
+                *to = unalignedGet32((void*)relAddr);
+                delta =  symAddr - (relAddr + 4);
+                if ((delta < - (1 << 11)) || (delta >= (1 << 11))) {
+                    ERR("Relocation: BRI12 out of range");
+                    goto err;
+                }
+                break;
+            }
+
+            /* *** Format: RI6  *** */
+            /* *** BEQZ.N, BNEZ.N *** */
+            if ((v & 0x008F) == 0x008C) {
+                int32_t delta =  symAddr - (relAddr + 4);
+                int32_t d2 = delta & 0x30;
+                int32_t d1 = (delta << 4) & 0xf0;
+                d2 |=  unalignedGet32((void*)(relAddr + 0));
+                d1 |=  unalignedGet32((void*)(relAddr + 1));
+                unalignedSet8((void*)(relAddr + 0), ((uint8_t*)&d2)[0]);
+                unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&d1)[0]);
+                *to = unalignedGet32((void*)relAddr);
+                if ((delta < 0) || (delta > 0x111111)) {
+                    ERR("Relocation: RI6 out of range");
+                    goto err;
+                }
+                break;
+            }
+
+            ERR("Relocation: unknown opcode %08X", v);
+            goto err;
+            break;
+        }
+        case R_XTENSA_ASM_EXPAND: {
+            *from = unalignedGet32((void*)relAddr);
+            *to = unalignedGet32((void*)relAddr);
+            break;
+        }
+        default:
+            MSG("Relocation: undefined relocation %d %s", type, type2String(type));
+            assert(0);
+            goto err;
     }
-    case R_XTENSA_SLOT0_OP: {
-        uint32_t v = unalignedGet32((void*)relAddr);
-        *from = v;
 
-        /* *** Format: L32R *** */
-        if ((v & 0x00000F) == 0x000001) {
-            int32_t delta =  symAddr - ((relAddr + 3) & 0xfffffffc);
-            if (delta & 0x0000003) {
-                ERR("Relocation: L32R error");
-                return -1;
-            }
-            delta =  delta >> 2;
-            unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[0]);
-            unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[1]);
-            *to = unalignedGet32((void*)relAddr);
-            break;
-        }
-
-        /* *** Format: CALL *** */
-        /* *** CALL0, CALL4, CALL8, CALL12, J *** */
-        if ((v & 0x00000F) == 0x000005) {
-            int32_t delta =  symAddr - ((relAddr + 4) & 0xfffffffc);
-            if (delta & 0x0000003) {
-                ERR("Relocation: CALL error");
-                return -1;
-            }
-            delta =  delta >> 2;
-            delta =  delta << 6;
-            delta |= unalignedGet8((void*)(relAddr + 0));
-            unalignedSet8((void*)(relAddr + 0), ((uint8_t*)&delta)[0]);
-            unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[1]);
-            unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[2]);
-            *to = unalignedGet32((void*)relAddr);
-            break;
-        }
-
-        /* *** J *** */
-        if ((v & 0x00003F) == 0x000006) {
-            int32_t delta =  symAddr - (relAddr + 4);
-            delta =  delta << 6;
-            delta |= unalignedGet8((void*)(relAddr + 0));
-            unalignedSet8((void*)(relAddr + 0), ((uint8_t*)&delta)[0]);
-            unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[1]);
-            unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[2]);
-            *to = unalignedGet32((void*)relAddr);
-            break;
-        }
-
-        /* *** Format: BRI8  *** */
-        /* *** BALL, BANY, BBC, BBCI, BBCI.L, BBS,  BBSI, BBSI.L, BEQ, BGE,  BGEU, BLT, BLTU, BNALL, BNE,  BNONE, LOOP,  *** */
-        /* *** BEQI, BF, BGEI, BGEUI, BLTI, BLTUI, BNEI,  BT, LOOPGTZ, LOOPNEZ *** */
-        if (((v & 0x00000F) == 0x000007) || ((v & 0x00003F) == 0x000026) ||  ((v & 0x00003F) == 0x000036 && (v & 0x0000FF) != 0x000036)) {
-            int32_t delta =  symAddr - (relAddr + 4);
-            unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[0]);
-            *to = unalignedGet32((void*)relAddr);
-            if ((delta < - (1 << 7)) || (delta >= (1 << 7))) {
-                ERR("Relocation: BRI8 out of range");
-                return -1;
-            }
-            break;
-        }
-
-        /* *** Format: BRI12 *** */
-        /* *** BEQZ, BGEZ, BLTZ, BNEZ *** */
-        if ((v & 0x00003F) == 0x000016) {
-            int32_t delta =  symAddr - (relAddr + 4);
-            delta =  delta << 4;
-            delta |=  unalignedGet32((void*)(relAddr + 1));
-            unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&delta)[0]);
-            unalignedSet8((void*)(relAddr + 2), ((uint8_t*)&delta)[1]);
-            *to = unalignedGet32((void*)relAddr);
-            delta =  symAddr - (relAddr + 4);
-            if ((delta < - (1 << 11)) || (delta >= (1 << 11))) {
-                ERR("Relocation: BRI12 out of range");
-                return -1;
-            }
-            break;
-        }
-
-        /* *** Format: RI6  *** */
-        /* *** BEQZ.N, BNEZ.N *** */
-        if ((v & 0x008F) == 0x008C) {
-            int32_t delta =  symAddr - (relAddr + 4);
-            int32_t d2 = delta & 0x30;
-            int32_t d1 = (delta << 4) & 0xf0;
-            d2 |=  unalignedGet32((void*)(relAddr + 0));
-            d1 |=  unalignedGet32((void*)(relAddr + 1));
-            unalignedSet8((void*)(relAddr + 0), ((uint8_t*)&d2)[0]);
-            unalignedSet8((void*)(relAddr + 1), ((uint8_t*)&d1)[0]);
-            *to = unalignedGet32((void*)relAddr);
-            if ((delta < 0) || (delta > 0x111111)) {
-                ERR("Relocation: RI6 out of range");
-                return -1;
-            }
-            break;
-        }
-
-        ERR("Relocation: unknown opcode %08X", v);
-        return -1;
-        break;
-    }
-    case R_XTENSA_ASM_EXPAND: {
-        *from = unalignedGet32((void*)relAddr);
-        *to = unalignedGet32((void*)relAddr);
-        break;
-    }
-    default:
-        MSG("Relocation: undefined relocation %d %s", type, type2String(type));
-        assert(0);
-        return -1;
-    }
+    PROFILER_STOP_RELOCATESYMBOL;
     return 0;
+err:
+    PROFILER_STOP_RELOCATESYMBOL;
+    return -1;
 }
 
-
+/* Iterate through the singly linked list of sections until you find the one
+ * that matches the provided index.
+ * All these section structs are in RAM. */
 static ELFLoaderSection_t *findSection(ELFLoaderContext_t* ctx, int index) {
-    for (ELFLoaderSection_t* section = ctx->section; section != NULL; section = section->next) {
+    PROFILER_START_FINDSECTION;
+
+    for (ELFLoaderSection_t* section=ctx->section; section != NULL; section = section->next) {
         if (section->secIdx == index) {
+            PROFILER_STOP_FINDSECTION;
             return section;
         }
     }
+    PROFILER_STOP_FINDSECTION;
     return NULL;
 }
 
 
-static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx, Elf32_Sym *sym, const char *sName) {
+static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx,
+        Elf32_Sym *sym, const char *sName) {
+    PROFILER_START_FINDSYMADDR;
+    #if CONFIG_ELFLOADER_SEARCH_LINEAR
+    {
+        for (int i = 0; i < ctx->env->exported_size; i++) {
+            if (strcmp(ctx->env->exported[i].name, sName) == 0) {
+                PROFILER_STOP_FINDSYMADDR;
+                return (Elf32_Addr)(ctx->env->exported[i].ptr);
+            }
+        }
+    }
+    #elif CONFIG_ELFLOADER_SEARCH_BINARY
     {
         // Binary search for symbol
         int first, middle, last, res;
@@ -352,63 +483,96 @@ static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx, Elf32_Sym *sym, const cha
                 first = middle + 1;
             }
             else {
+                PROFILER_STOP_FINDSYMADDR;
                 return (Elf32_Addr)(ctx->env->exported[middle].ptr);
             }
             middle = (first + last)/2;
         }
     }
+    #endif
+
     ELFLoaderSection_t *symSec = findSection(ctx, sym->st_shndx);
-    if (symSec)
+    if (symSec) {
+        PROFILER_STOP_FINDSYMADDR;
         return ((Elf32_Addr) symSec->data) + sym->st_value;
+    }
+    PROFILER_STOP_FINDSYMADDR;
     return 0xffffffff;
 }
 
 
 static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
+    PROFILER_START_RELOCATESECTION;
+
     char name[32] = "<unamed>";
     Elf32_Shdr sectHdr;
     if (readSection(ctx, s->relSecIdx, &sectHdr, name, sizeof(name)) != 0) {
         ERR("Error reading section header");
-        return -1;
+        goto err;
     }
     if (!(s->relSecIdx)) {
+        PROFILER_STOP_RELOCATESECTION;
         MSG("  Section %s: no relocation index", name);
         return 0;
     }
     if (!(s->data)) {
         ERR("Section not loaded: %s", name);
-        return -1;
+        goto err;
     }
     MSG("  Section %s", name);
     int r = 0;
     Elf32_Rela rel;
     size_t relEntries = sectHdr.sh_size / sizeof(rel);
-    MSG("  Offset   Sym  Type                      relAddr  symAddr  defValue                    Name + addend");
+    MSG("  Offset   Sym  Type                      relAddr  "
+        "symAddr  defValue                    Name + addend");
     for (size_t relCount = 0; relCount < relEntries; relCount++) {
-        LOADER_GETDATA(ctx, sectHdr.sh_offset + relCount * (sizeof(rel)), &rel, sizeof(rel))
+        LOADER_GETDATA(ctx, sectHdr.sh_offset + relCount * (sizeof(rel)),
+                &rel, sizeof(rel))
         Elf32_Sym sym;
         char name[65] = "<unnamed>";
         int symEntry = ELF32_R_SYM(rel.r_info);
         int relType = ELF32_R_TYPE(rel.r_info);
-        Elf32_Addr relAddr = ((Elf32_Addr) s->data) + rel.r_offset;		// data to be updated adress
+
+        /* data to be updated address */
+        Elf32_Addr relAddr = ((Elf32_Addr) s->data) + rel.r_offset;
         readSymbol(ctx, symEntry, &sym, name, sizeof(name));
-        Elf32_Addr symAddr = findSymAddr(ctx, &sym, name) + rel.r_addend; // target symbol adress
+
+        /* Target Symbol Address */
+        Elf32_Addr symAddr = findSymAddr(ctx, &sym, name) + rel.r_addend;
+
         uint32_t from, to;
         if (relType == R_XTENSA_NONE || relType == R_XTENSA_ASM_EXPAND) {
-//            MSG("  %08X %04X %04X %-20s %08X          %08X                    %s + %X", rel.r_offset, symEntry, relType, type2String(relType), relAddr, sym.st_value, name, rel.r_addend);
-        } else if ((symAddr == 0xffffffff) && (sym.st_value == 0x00000000)) {
+#if 0
+            MSG("  %08X %04X %04X %-20s %08X          %08X"
+                "                    %s + %X",
+                rel.r_offset, symEntry, relType, type2String(relType),
+                relAddr, sym.st_value, name, rel.r_addend);
+#endif
+        }
+        else if ( (symAddr == 0xffffffff) && (sym.st_value == 0x00000000) ) {
             ERR("Relocation - undefined symAddr: %s", name);
-            MSG("  %08X %04X %04X %-20s %08X %08X %08X                    %s + %X", rel.r_offset, symEntry, relType, type2String(relType), relAddr, symAddr, sym.st_value, name, rel.r_addend);
+            MSG("  %08X %04X %04X %-20s %08X %08X %08X"
+                "                    %s + %X",
+                rel.r_offset, symEntry, relType, type2String(relType),
+                relAddr, symAddr, sym.st_value, name, rel.r_addend);
             r = -1;
-        } else if(relocateSymbol(relAddr, relType, symAddr, sym.st_value, &from, &to) != 0) {
-            ERR("  %08X %04X %04X %-20s %08X %08X %08X %08X->%08X %s + %X", rel.r_offset, symEntry, relType, type2String(relType), relAddr, symAddr, sym.st_value, from, to, name, rel.r_addend);
+        }
+        else if(relocateSymbol(relAddr, relType, symAddr, sym.st_value, &from, &to) != 0) {
+            ERR("  %08X %04X %04X %-20s %08X %08X %08X %08X->%08X %s + %X",
+                    rel.r_offset, symEntry, relType, type2String(relType),
+                    relAddr, symAddr, sym.st_value, from, to, name, rel.r_addend);
             r = -1;
-        } else {
-            MSG("  %08X %04X %04X %-20s %08X %08X %08X %08X->%08X %s + %X", rel.r_offset, symEntry, relType, type2String(relType), relAddr, symAddr, sym.st_value, from, to, name, rel.r_addend);
+        }
+        else {
+            MSG("  %08X %04X %04X %-20s %08X %08X %08X %08X->%08X %s + %X",
+                    rel.r_offset, symEntry, relType, type2String(relType),
+                    relAddr, symAddr, sym.st_value, from, to, name, rel.r_addend);
         }
     }
+    PROFILER_STOP_RELOCATESECTION;
     return r;
 err:
+    PROFILER_STOP_RELOCATESECTION;
     ERR("Error reading relocation data");
     return -1;
 }
@@ -433,45 +597,86 @@ void elfLoaderFree(ELFLoaderContext_t* ctx) {
     }
 }
 
-/* Reads and verify the ELF Header;
- * Loads all the section headers;
- * finds table of strings
+/* First Operation: Performs the following:
+ *     * Allocates space for the returned Context (constant size)
+ *     * Populates Context with:
+ *         * Pointer/FD to the beginning of the ELF file
+ *         * Pointer to env, which is a table to exported host function_names and their pointer in memory. 
+ *         * Number of sections in the ELF file.
+ *         * offset to SectionHeaderTable, which maps an index to a offset in ELF where the section header begins.
+ *         * offset to StringTable, which is a list of null terminated strings.
  */
 ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
+    Elf32_Ehdr header;
+    Elf32_Shdr section;
+    ELFLoaderContext_t *ctx = NULL;
+
+    /********************************************
+     * Print All Exported Functions (Debugging) *
+     ********************************************/
     MSG("ENV:");
     for (int i = 0; i < env->exported_size; i++) {
-        MSG("  %08X %s", (unsigned int) env->exported[i].ptr, env->exported[i].name);
+        MSG("       %08X %s", (unsigned int) env->exported[i].ptr, env->exported[i].name);
     }
 
-    ELFLoaderContext_t* ctx = malloc(sizeof(ELFLoaderContext_t));
-    assert(ctx);
-
+    /***********************************************
+     * Initialize the context object with pointers *
+     ***********************************************/
+    ctx = malloc(sizeof(ELFLoaderContext_t));
+    if(NULL == ctx) {
+        ERR("Insufficient memory for ElfLoaderContext_t");
+        goto err;
+    }
     memset(ctx, 0, sizeof(ELFLoaderContext_t));
     ctx->fd = fd;
     ctx->env = env;
-    Elf32_Ehdr header;
-    Elf32_Shdr section;
-    /* Load the ELF header, located at the start of the buffer. */
+
+    /********************************************************************
+     * Load the ELF header (Ehdr), located at the beginning of the file *
+     ********************************************************************/
     LOADER_GETDATA(ctx, 0, &header, sizeof(Elf32_Ehdr));
 
     /* Make sure that we have a correct and compatible ELF header. */
     char ElfMagic[] = { 0x7f, 'E', 'L', 'F', '\0' };
-    if (memcmp(header.e_ident, ElfMagic, strlen(ElfMagic)) != 0) {
+    if ( memcmp(header.e_ident, ElfMagic, strlen(ElfMagic)) != 0 ) {
         ERR("Bad ELF Identification");
         goto err;
     }
 
-    /* Load the section header, get the number of entries of the section header,
-     * get a pointer to the actual table of strings */
+    /* Populate context with ELF Header information*/
+    ctx->e_shnum = header.e_shnum; // Number of Sections
+    ctx->e_shoff = header.e_shoff; // offset to SectionHeaderTable
+
+    /*********************************************
+     * Load the SectionHeader of the StringTable *
+     *********************************************/
+    /* Purpose: Store in context where the StringTable begins in the file */
+    /* The StringTable is at index header.e_shstrndx of the SectionHeaderTable,
+     * which begins at header.e_shoff. */
     LOADER_GETDATA(ctx, header.e_shoff + header.e_shstrndx * sizeof(Elf32_Shdr),
             &section, sizeof(Elf32_Shdr));
-    ctx->e_shnum = header.e_shnum;
-    ctx->e_shoff = header.e_shoff;
+#if CONFIG_ELFLOADER_POSIX
+    // Read the StringTable into memory
+    MSG("String Table Size: %d", section.sh_size);
+    ctx->shstrtab = malloc( section.sh_size );
+    if( NULL == ctx->shstrtab ) {
+        ERR("Insufficient memory for StringTable\n");
+        goto err;
+    }
+    LOADER_GETDATA(ctx, section.sh_offset, ctx->shstrtab, section.sh_size);
+    //memcpy(ctx->shstrtab, section.sh_offset, section.sh_size);
+#else
+    // Store the offset from beginning of ELF where the StringTable begins.
     ctx->shstrtab_offset = section.sh_offset;
-    return ctx;
-err:
-    return NULL;
+#endif
 
+    return ctx;
+
+err:
+    if( NULL != ctx ) {
+        free(ctx);
+    }
+    return NULL;
 }
 
 /* user has to remember to free allocated content buffer */
@@ -509,54 +714,94 @@ err:
     return NULL;
 }
 
+/* Second Operation: 
+ *     1) For Each Section Header:
+ *         a) Read Section Header from ELF to stack variable
+ *             i) Read the section's name from StringTable
+ *         b) If SH_ALLOC:
+ *             i) Allocates and populates memory for data
+ *            If SH_RELA:
+ *             i) Finds the section where the rela information applies
+ *             ii) Link that section to this section
+ *         c) Store index of .text, .strtab, .symtab
+ * General Notes:
+ *     * ELFLoaderSection structs form a singly linked list.
+ * */
 ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
-    /* Go through all sections, allocate and copy the relevant ones
-    ".symtab": segment contains the symbol table for this file
-    ".strtab": segment points to the actual string names used by the symbol table
-    */
     MSG("Scanning ELF sections         relAddr      size");
+    // Iterate through all section_headers
     for (int n = 1; n < ctx->e_shnum; n++) {
         Elf32_Shdr sectHdr;
         char name[33] = "<unamed>";
+
+        /***********************
+         * Read Section Header *
+         ***********************/
+        // Read the section header at index n
+        // Populates "secHdr" with the Section's Header
+        // Populates "name" with the section's name retrieved from the StringTable.
         if (readSection(ctx, n, &sectHdr, name, sizeof(name)) != 0) {
             ERR("Error reading section");
             goto err;
         }
-        if (sectHdr.sh_flags & SHF_ALLOC) {
+
+        if (sectHdr.sh_flags & SHF_ALLOC) { // This  section  occupies  memory during process execution
             if (!sectHdr.sh_size) {
                 MSG("  section %2d: %-15s no data", n, name);
-            } else {
+            } 
+            else {
+                // Allocate space for Section Struct (not data)
                 ELFLoaderSection_t* section = malloc(sizeof(ELFLoaderSection_t));
                 assert(section);
                 memset(section, 0, sizeof(ELFLoaderSection_t));
+
+                /* populate the Section elements */
+                section->secIdx = n;
+                section->size = sectHdr.sh_size;
+                // Add it to the beginning of the SinglyLinkedList
                 section->next = ctx->section;
                 ctx->section = section;
-                if (sectHdr.sh_flags & SHF_EXECINSTR) {
-                    section->data = LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size));
-                } else {
-                    section->data = LOADER_ALLOC_DATA(CEIL4(sectHdr.sh_size));
-                }
+
+                /* Allocate memory */
+                section->data = ( sectHdr.sh_flags & SHF_EXECINSTR ) ?
+                        LOADER_ALLOC_EXEC(CEIL4(sectHdr.sh_size)) : // Executable Memory
+                        LOADER_ALLOC_DATA(CEIL4(sectHdr.sh_size)) ; // Normal Memory
                 if (!section->data) {
                     ERR("Section malloc failed: %s", name);
                     goto err;
                 }
-                section->secIdx = n;
-                section->size = sectHdr.sh_size;
+
+                /* Load Section into allocated data */
                 if (sectHdr.sh_type != SHT_NOBITS) {
                     LOADER_GETDATA(ctx, sectHdr.sh_offset, section->data, CEIL4(sectHdr.sh_size));
                 }
+
+                /* If this is the text section, populate the Context field */
                 if (strcmp(name, ".text") == 0) {
                     ctx->text = section->data;
                 }
+
                 MSG("  section %2d: %-15s %08X %6i", n, name, (unsigned int) section->data, sectHdr.sh_size);
             }
-        } else if (sectHdr.sh_type == SHT_RELA) {
+        }
+        else if (sectHdr.sh_type == SHT_RELA) { // Relocation entries with addends
+            /* sh_info holds extra information that depends on sh_type.
+             * For sh_type SHT_RELA:
+             *     The section header index of the section to which the 
+             *     relocation applies.
+             */
+
+            /* If the index is greater than the number of sections that exist,
+             * it must be erroneous */
             if (sectHdr.sh_info >= n) {
                 ERR("Rela section: bad linked section (%i:%s -> %i)", n, name, sectHdr.sh_info);
                 goto err;
             }
+
+            /* iterate through the singly linked list of sections until you
+             * find the one that matches sh_info */
             ELFLoaderSection_t* section = findSection(ctx, sectHdr.sh_info);
-            if (section == NULL) {
+            if (section == NULL) { // Cannot find section
                 MSG("  section %2d: %-15s -> %2d: ignoring", n, name, sectHdr.sh_info);
             } else {
                 section->relSecIdx = n;
@@ -651,6 +896,25 @@ int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int arg
         0 != elfLoaderSetFunc(ctx, funcname) ) {
         r = -1; goto err;
     }
+    #if CONFIG_ELFLOADER_PROFILER_EN
+        MSG("\nELF Loader Profiling Results:\n"
+                "Function Name          Time (uS)\n"
+                "readSection:           %lld\n"
+                "readSymbol:            %lld\n"
+                "readSymbolFunc:        %lld\n"
+                "relocateSymbol:        %lld\n"
+                "findSymAddr:           %lld\n"
+                "relocateSection:       %lld\n"
+                "\n",
+                profiler_readSection.t,
+                profiler_readSymbol.t,
+                profiler_readSymbolFunc.t,
+                profiler_relocateSymbol.t,
+                profiler_findSymAddr.t,
+                profiler_relocateSection.t
+                );
+
+    #endif
     r = elfLoaderRun(ctx, argc, argv);
 err:
     elfLoaderFree(ctx);
