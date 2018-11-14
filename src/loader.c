@@ -508,10 +508,12 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
 
     char name[32] = "<unamed>";
     Elf32_Shdr sectHdr;
+    PROFILER_STOP_RELOCATESECTION;
     if (readSection(ctx, s->relSecIdx, &sectHdr, name, sizeof(name)) != 0) {
         ERR("Error reading section header");
         goto err;
     }
+    PROFILER_START_RELOCATESECTION;
     if (!(s->relSecIdx)) {
         PROFILER_STOP_RELOCATESECTION;
         MSG("  Section %s: no relocation index", name);
@@ -537,10 +539,14 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
 
         /* data to be updated address */
         Elf32_Addr relAddr = ((Elf32_Addr) s->data) + rel.r_offset;
+        PROFILER_STOP_RELOCATESECTION;
         readSymbol(ctx, symEntry, &sym, name, sizeof(name));
+        PROFILER_START_RELOCATESECTION;
 
         /* Target Symbol Address */
+        PROFILER_STOP_RELOCATESECTION;
         Elf32_Addr symAddr = findSymAddr(ctx, &sym, name) + rel.r_addend;
+        PROFILER_START_RELOCATESECTION;
 
         uint32_t from, to;
         if (relType == R_XTENSA_NONE || relType == R_XTENSA_ASM_EXPAND) {
