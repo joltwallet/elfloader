@@ -43,6 +43,9 @@ config ELFLOADER_CACHE_STRTAB
     prompt "Cache StringTable to Memory"
     default y
     help
-        Allocates memory to cache the .strtab section to memory.
+        Allocates memory to cache the .strtab section to memory. In tests, 
+        this occupies ~4KB of memory (depends on number of symbols and name 
+        length, just provided here for a magnitude estimate) and made loading 
+        500mS faster.
 
 endmenu
