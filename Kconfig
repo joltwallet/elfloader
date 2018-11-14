@@ -30,11 +30,19 @@ choice
             Takes O(log(n)) to find a symbol.
 endchoice
 
-    config ELFLOADER_PROFILER_EN
-        bool
-        prompt "Enable ELF Loader Profiling"
-        default n
-        help
-            Enable profiling tools.
+config ELFLOADER_PROFILER_EN
+    bool
+    prompt "Enable ELF Loader Profiling"
+    default n
+    help
+        Enable profiling tools. Takes up additional memory and some CPU cycles.
+
+config ELFLOADER_CACHE_STRTAB
+    bool
+    depends on ELFLOADER_POSIX
+    prompt "Cache StringTable to Memory"
+    default y
+    help
+        Allocates memory to cache the .strtab section to memory.
 
 endmenu

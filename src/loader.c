@@ -99,7 +99,7 @@ struct ELFLoaderContext_t {
     size_t symtab_count;
     off_t symtab_offset;
     off_t strtab_offset;
-#if 0 && CONFIG_ELFLOADER_POSIX
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_STRTAB
     char *shstrtab; // for caching the section header string table
 #else
     off_t shstrtab_offset;
@@ -193,8 +193,8 @@ static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h,
     if (NULL != name && h->sh_name) {
         // h->sh_name is the offset into the StringTable where the 
         // NULL-terminated string is located.
-#if 0 && CONFIG_ELFLOADER_POSIX
-        strlcpy(name, ctx->shstrtab, name_len);
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_STRTAB
+        strlcpy(name, ctx->shstrtab + h->sh_name, name_len);
 #else
         offset = ctx->shstrtab_offset + h->sh_name;
         LOADER_GETDATA(ctx, offset, name, name_len);
@@ -629,7 +629,7 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
      * which begins at header.e_shoff. */
     LOADER_GETDATA(ctx, header.e_shoff + header.e_shstrndx * sizeof(Elf32_Shdr),
             &section, sizeof(Elf32_Shdr));
-#if 0 && CONFIG_ELFLOADER_POSIX
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_STRTAB
     // Read the StringTable into memory
     MSG("String Table Size: %d", section.sh_size);
     ctx->shstrtab = malloc( section.sh_size );
@@ -638,7 +638,6 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
         goto err;
     }
     LOADER_GETDATA(ctx, section.sh_offset, ctx->shstrtab, section.sh_size);
-    //memcpy(ctx->shstrtab, section.sh_offset, section.sh_size);
 #else
     // Store the offset from beginning of ELF where the StringTable begins.
     ctx->shstrtab_offset = section.sh_offset;
