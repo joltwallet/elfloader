@@ -111,8 +111,9 @@ struct ELFLoaderContext_t {
 /* Profiler Variables */
 #if CONFIG_ELFLOADER_PROFILER_EN
 typedef struct profiler_timer_t{
-    int64_t t;
-    bool running;
+    int64_t t;       // time in uS spent
+    uint32_t n;      // times start has been called
+    bool running;    // if timer is running
 } profiler_timer_t;
 
 static profiler_timer_t profiler_readSection = { 0 };
@@ -128,6 +129,10 @@ static profiler_timer_t profiler_relocateSection = { 0 };
         x.running = true; \
         x.t -= esp_timer_get_time(); \
     }
+
+#define PROFILER_INC(x) \
+    x.n++;
+
 #define PROFILER_STOP(x) \
     if(x.running) { \
         x.running = false; \
@@ -150,6 +155,14 @@ static profiler_timer_t profiler_relocateSection = { 0 };
 #define PROFILER_STOP_FINDSECTION     PROFILER_STOP(profiler_findSection)
 #define PROFILER_STOP_RELOCATESECTION PROFILER_STOP(profiler_relocateSection)
 
+#define PROFILER_INC_READSECTION     PROFILER_INC(profiler_readSection)
+#define PROFILER_INC_READSYMBOL      PROFILER_INC(profiler_readSymbol)
+#define PROFILER_INC_READSYMBOLFUNC  PROFILER_INC(profiler_readSymbolFunc)
+#define PROFILER_INC_RELOCATESYMBOL  PROFILER_INC(profiler_relocateSymbol)
+#define PROFILER_INC_FINDSYMADDR     PROFILER_INC(profiler_findSymAddr)
+#define PROFILER_INC_FINDSECTION     PROFILER_INC(profiler_findSection)
+#define PROFILER_INC_RELOCATESECTION PROFILER_INC(profiler_relocateSection)
+
 #else
 // dummy macros
 
@@ -167,6 +180,14 @@ static profiler_timer_t profiler_relocateSection = { 0 };
 #define PROFILER_STOP_FINDSYMADDR 
 #define PROFILER_STOP_RELOCATESECTION 
 
+#define PROFILER_INC_READSECTION
+#define PROFILER_INC_READSYMBOL
+#define PROFILER_INC_READSYMBOLFUNC
+#define PROFILER_INC_RELOCATESYMBOL
+#define PROFILER_INC_FINDSYMADDR
+#define PROFILER_INC_FINDSECTION 
+#define PROFILER_INC_RELOCATESECTION
+
 #endif
 
 /*** Read data functions ***/
@@ -180,6 +201,7 @@ static profiler_timer_t profiler_relocateSection = { 0 };
 static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h,
         char *name, const size_t name_len) {
     PROFILER_START_READSECTION;
+    PROFILER_INC_READSECTION;
 
     off_t offset;
 
@@ -213,6 +235,7 @@ err:
 static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym,
         char *name, const size_t nlen) {
     PROFILER_START_READSYMBOL;
+    PROFILER_INC_READSYMBOL;
 
     off_t pos = ctx->symtab_offset + n * sizeof(Elf32_Sym);
     LOADER_GETDATA(ctx, pos, sym, sizeof(Elf32_Sym))
@@ -239,6 +262,7 @@ err:
 static int readSymbolFunc(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym,
         char *name, const size_t nlen) {
     PROFILER_START_READSYMBOLFUNC;
+    PROFILER_INC_READSYMBOLFUNC;
 
     off_t pos = ctx->symtab_offset + n * sizeof(Elf32_Sym);
     LOADER_GETDATA(ctx, pos, sym, sizeof(Elf32_Sym))
@@ -275,6 +299,7 @@ static int relocateSymbol(Elf32_Addr relAddr, int type, Elf32_Addr symAddr,
         Elf32_Addr defAddr, uint32_t* from, uint32_t* to) {
 
     PROFILER_START_RELOCATESYMBOL;
+    PROFILER_INC_RELOCATESYMBOL;
 
     if (symAddr == 0xffffffff) {
         if (defAddr == 0x00000000) {
@@ -417,6 +442,7 @@ err:
  * All these section structs are in RAM. */
 static ELFLoaderSection_t *findSection(ELFLoaderContext_t* ctx, int index) {
     PROFILER_START_FINDSECTION;
+    PROFILER_INC_FINDSECTION;
 
     for (ELFLoaderSection_t* section=ctx->section; section != NULL; section = section->next) {
         if (section->secIdx == index) {
@@ -432,6 +458,7 @@ static ELFLoaderSection_t *findSection(ELFLoaderContext_t* ctx, int index) {
 static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx,
         Elf32_Sym *sym, const char *sName) {
     PROFILER_START_FINDSYMADDR;
+    PROFILER_INC_FINDSYMADDR;
     #if CONFIG_ELFLOADER_SEARCH_LINEAR
     {
         for (int i = 0; i < ctx->env->exported_size; i++) {
@@ -477,6 +504,7 @@ static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx,
 
 static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
     PROFILER_START_RELOCATESECTION;
+    PROFILER_INC_RELOCATESECTION;
 
     char name[32] = "<unamed>";
     Elf32_Shdr sectHdr;
@@ -896,22 +924,33 @@ void elfLoaderProfilerReset() {
 
 /* Prints the profiler results to uart console */
 void elfLoaderProfilerPrint() {
+    int64_t total_time;
+    total_time = 
+        profiler_readSection.t      +
+        profiler_readSymbol.t       +
+        profiler_readSymbolFunc.t   +
+        profiler_relocateSymbol.t   +
+        profiler_findSymAddr.t      + 
+        profiler_relocateSection.t
+        ;
+
     MSG("\nELF Loader Profiling Results:\n"
-            "Function Name          Time (uS)\n"
-            "readSection:           %lld\n"
-            "readSymbol:            %lld\n"
-            "readSymbolFunc:        %lld\n"
-            "relocateSymbol:        %lld\n"
-            "findSymAddr:           %lld\n"
-            "relocateSection:       %lld\n"
+            "Function Name          Time (uS)    Calls \n"
+            "readSection:           %10lld    %8d\n"
+            "readSymbol:            %10lld    %8d\n"
+            "readSymbolFunc:        %10lld    %8d\n"
+            "relocateSymbol:        %10lld    %8d\n"
+            "findSymAddr:           %10lld    %8d\n"
+            "relocateSection:       %10lld    %8d\n"
+            "total time:            %10lld\n"
             "\n",
-            profiler_readSection.t,
-            profiler_readSymbol.t,
-            profiler_readSymbolFunc.t,
-            profiler_relocateSymbol.t,
-            profiler_findSymAddr.t,
-            profiler_relocateSection.t
-            );
+            profiler_readSection.t,     profiler_readSection.n,
+            profiler_readSymbol.t,      profiler_readSymbol.n,
+            profiler_readSymbolFunc.t,  profiler_readSymbolFunc.n,
+            profiler_relocateSymbol.t,  profiler_relocateSymbol.n,
+            profiler_findSymAddr.t,     profiler_findSymAddr.n,
+            profiler_relocateSection.t, profiler_relocateSection.n,
+            total_time);
 }
 #endif
 
