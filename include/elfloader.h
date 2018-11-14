@@ -6,12 +6,11 @@
 
 #if defined(__linux__)
 #define LOADER_FD_T FILE *
-#endif
-
-#if !(defined(__linux__))
+#elif CONFIG_ELFLOADER_POSIX
+#define LOADER_FD_T FILE *
+#else
 #define LOADER_FD_T void*
 #endif
-
 
 typedef struct {
     const char *name; /*!< Name of symbol */
@@ -40,5 +39,13 @@ void* elfLoaderGetTextAddr(ELFLoaderContext_t *ctx);
 
 
 void *elfLoaderLoadSectionByName(const ELFLoaderContext_t *ctx, const char *name, size_t * data_len );
-#define INTERFACE 0
+
+#if CONFIG_ELFLOADER_PROFILER_EN
+/* Sets all profiler variables to 0 */
+void elfLoaderProfilerReset();
+
+/* Prints the profiler results to uart console */
+void elfLoaderProfilerPrint();
+#endif // CONFIG_ELFLOADER_PROFILER_EN
+
 #endif

@@ -31,36 +31,11 @@
 
 #if CONFIG_ELFLOADER_PROFILER_EN
 #include <esp_timer.h> // profiling
-#endif
+#endif // CONFIG_ELFLOADER_PROFILER_EN
 
 #include "elfloader.h"
 #include "elf.h"
 #include "unaligned.h"
-
-#if INTERFACE
-#include <stdio.h>
-#include <stdint.h>
-
-#ifdef __linux__ || CONFIG_ELFLOADER_POSIX
-#define LOADER_FD_T FILE *
-#else
-#define LOADER_FD_T void*
-#endif
-
-typedef struct {
-    const char *name; /*!< Name of symbol */
-    void *ptr; /*!< Pointer of symbol in memory */
-} ELFLoaderSymbol_t;
-
-typedef struct {
-    const ELFLoaderSymbol_t *exported; /*!< Pointer to exported symbols array */
-    unsigned int exported_size; /*!< Elements on exported symbol array */
-} ELFLoaderEnv_t;
-
-typedef struct ELFLoaderContext_t ELFLoaderContext_t;
-
-#endif // INTERFACE
-
 
 #ifdef __linux__
 
@@ -69,7 +44,6 @@ typedef struct ELFLoaderContext_t ELFLoaderContext_t;
 #define LOADER_ALLOC_DATA(size) memalign(4, size)
 
 #define MSG(...) printf(__VA_ARGS__); printf("\n");
-//#define ERR(...) printf(__VA_ARGS__); printf("\n"); assert(0);
 #define ERR(...) printf(__VA_ARGS__); printf("\n");
 
 #define LOADER_GETDATA(ctx, off, buffer, size) \
@@ -125,7 +99,7 @@ struct ELFLoaderContext_t {
     size_t symtab_count;
     off_t symtab_offset;
     off_t strtab_offset;
-#if CONFIG_ELFLOADER_POSIX
+#if 0 && CONFIG_ELFLOADER_POSIX
     char *shstrtab; // for caching the section header string table
 #else
     off_t shstrtab_offset;
@@ -219,7 +193,7 @@ static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h,
     if (NULL != name && h->sh_name) {
         // h->sh_name is the offset into the StringTable where the 
         // NULL-terminated string is located.
-#if CONFIG_ELFLOADER_POSIX
+#if 0 && CONFIG_ELFLOADER_POSIX
         strlcpy(name, ctx->shstrtab, name_len);
 #else
         offset = ctx->shstrtab_offset + h->sh_name;
@@ -655,7 +629,7 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
      * which begins at header.e_shoff. */
     LOADER_GETDATA(ctx, header.e_shoff + header.e_shstrndx * sizeof(Elf32_Shdr),
             &section, sizeof(Elf32_Shdr));
-#if CONFIG_ELFLOADER_POSIX
+#if 0 && CONFIG_ELFLOADER_POSIX
     // Read the StringTable into memory
     MSG("String Table Size: %d", section.sh_size);
     ctx->shstrtab = malloc( section.sh_size );
@@ -897,23 +871,7 @@ int elfLoader(LOADER_FD_T fd, const ELFLoaderEnv_t *env, char* funcname, int arg
         r = -1; goto err;
     }
     #if CONFIG_ELFLOADER_PROFILER_EN
-        MSG("\nELF Loader Profiling Results:\n"
-                "Function Name          Time (uS)\n"
-                "readSection:           %lld\n"
-                "readSymbol:            %lld\n"
-                "readSymbolFunc:        %lld\n"
-                "relocateSymbol:        %lld\n"
-                "findSymAddr:           %lld\n"
-                "relocateSection:       %lld\n"
-                "\n",
-                profiler_readSection.t,
-                profiler_readSymbol.t,
-                profiler_readSymbolFunc.t,
-                profiler_relocateSymbol.t,
-                profiler_findSymAddr.t,
-                profiler_relocateSection.t
-                );
-
+    elfLoaderProfilerPrint();
     #endif
     r = elfLoaderRun(ctx, argc, argv);
 err:
@@ -924,3 +882,37 @@ err:
 void* elfLoaderGetTextAddr(ELFLoaderContext_t *ctx) {
     return ctx->text;
 }
+
+#if CONFIG_ELFLOADER_PROFILER_EN
+/* Sets all profiler variables to 0 */
+void elfLoaderProfilerReset() {
+    memset(&profiler_readSection, 0, sizeof(profiler_timer_t));
+    memset(&profiler_readSymbol, 0, sizeof(profiler_timer_t));
+    memset(&profiler_readSymbolFunc, 0, sizeof(profiler_timer_t));
+    memset(&profiler_relocateSymbol, 0, sizeof(profiler_timer_t));
+    memset(&profiler_findSymAddr, 0, sizeof(profiler_timer_t));
+    memset(&profiler_findSection, 0, sizeof(profiler_timer_t));
+    memset(&profiler_relocateSection, 0, sizeof(profiler_timer_t));
+}
+
+/* Prints the profiler results to uart console */
+void elfLoaderProfilerPrint() {
+    MSG("\nELF Loader Profiling Results:\n"
+            "Function Name          Time (uS)\n"
+            "readSection:           %lld\n"
+            "readSymbol:            %lld\n"
+            "readSymbolFunc:        %lld\n"
+            "relocateSymbol:        %lld\n"
+            "findSymAddr:           %lld\n"
+            "relocateSection:       %lld\n"
+            "\n",
+            profiler_readSection.t,
+            profiler_readSymbol.t,
+            profiler_readSymbolFunc.t,
+            profiler_relocateSymbol.t,
+            profiler_findSymAddr.t,
+            profiler_relocateSection.t
+            );
+}
+#endif
+
