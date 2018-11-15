@@ -48,6 +48,7 @@
  * Profiler Tools *
  ******************/
 #if CONFIG_ELFLOADER_PROFILER_EN
+// Timers
 typedef struct profiler_timer_t{
     int64_t t;       // time in uS spent
     uint32_t n;      // times start has been called
@@ -62,8 +63,14 @@ static profiler_timer_t profiler_findSymAddr      = { 0 };
 static profiler_timer_t profiler_findSection      = { 0 };
 static profiler_timer_t profiler_relocateSection  = { 0 };
 
+// Caching Statistics
 static uint64_t profiler_cache_hit  = 0;
 static uint64_t profiler_cache_miss = 0;
+
+// Relocation Information
+static uint32_t profiler_rel_count = 0;
+static uint32_t profiler_max_r_offset = 0;
+static uint32_t profiler_max_r_addend = 0;
 
 #define PROFILER_START(x) \
     if(!x.running) { \
@@ -107,6 +114,12 @@ static uint64_t profiler_cache_miss = 0;
 #define PROFILER_CACHE_HIT             profiler_cache_hit++;
 #define PROFILER_CACHE_MISS            profiler_cache_miss++;
 
+#define PROFILER_MAX_R_OFFSET(x)       if(x>profiler_max_r_offset) \
+                                           profiler_max_r_offset = x;
+#define PROFILER_MAX_R_ADDEND(x)       if(x>profiler_max_r_addend) \
+                                           profiler_max_r_addend = x;
+#define PROFILER_REL_COUNT(x)          profiler_rel_count += x;
+
 #else
 // dummy macros
 
@@ -134,6 +147,10 @@ static uint64_t profiler_cache_miss = 0;
 
 #define PROFILER_CACHE_HIT
 #define PROFILER_CACHE_MISS
+
+#define PROFILER_MAX_R_OFFSET(x)
+#define PROFILER_MAX_R_ADDEND(x)
+#define PROFILER_REL_COUNT(x)
 
 #endif
 
@@ -208,7 +225,7 @@ struct ELFLoaderContext_t {
 
 static const char* TAG = "elfLoader";
 
-#define MSG(...) ESP_LOGD(TAG,  __VA_ARGS__);
+#define MSG(...) ESP_LOGI(TAG,  __VA_ARGS__);
 #define MSGI(...) ESP_LOGI(TAG,  __VA_ARGS__);
 #define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
 
@@ -364,7 +381,7 @@ err:
     return -1;
 }
 
-/* Populates sym, name */
+/* Populates sym, name from section index n */
 static int readSymbol(ELFLoaderContext_t *ctx, int n, Elf32_Sym *sym,
         char *name, const size_t nlen) {
     PROFILER_START_READSYMBOL;
@@ -422,7 +439,7 @@ static const char *type2String(int symt) {
         STRCASE(R_XTENSA_ASM_EXPAND)
         STRCASE(R_XTENSA_SLOT0_OP)
     default:
-        return "R_<unknow>";
+        return "R_<unknown>";
     }
 #undef STRCASE
 }
@@ -641,36 +658,43 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
 
     char name[32] = "<unamed>";
     Elf32_Shdr sectHdr;
+
     PROFILER_STOP_RELOCATESECTION;
     if (readSection(ctx, s->relSecIdx, &sectHdr, name, sizeof(name)) != 0) {
         ERR("Error reading section header");
         goto err;
     }
     PROFILER_START_RELOCATESECTION;
+
     if (!(s->relSecIdx)) {
         PROFILER_STOP_RELOCATESECTION;
         MSG("  Section %s: no relocation index", name);
         return 0;
     }
+
     if (!(s->data)) {
         ERR("Section not loaded: %s", name);
         goto err;
     }
+
     MSG("  Section %s", name);
     int r = 0;
     Elf32_Rela rel;
     size_t relEntries = sectHdr.sh_size / sizeof(rel);
+    PROFILER_REL_COUNT(relEntries);
     MSG("  Offset   Sym  Type                      relAddr  "
         "symAddr  defValue                    Name + addend");
     for (size_t relCount = 0; relCount < relEntries; relCount++) {
-        // todo: This looks expensive
         off_t offset = sectHdr.sh_offset + relCount * (sizeof(rel));
         MSG("Reading in ELF32_Rela from offset 0x%x", (uint32_t)offset);
-        LOADER_GETDATA(ctx, offset, &rel, sizeof(rel))
+        LOADER_GETDATA(ctx, offset, &rel, sizeof(rel));
+        PROFILER_MAX_R_OFFSET(rel.r_offset);
+        PROFILER_MAX_R_ADDEND(rel.r_addend);
+
         Elf32_Sym sym;
         char name[65] = "<unnamed>";
-        int symEntry = ELF32_R_SYM(rel.r_info);
-        int relType = ELF32_R_TYPE(rel.r_info);
+        int symEntry = ELF32_R_SYM(rel.r_info); // SymbolTable Index; just rel.r_info shift right by 8
+        int relType = ELF32_R_TYPE(rel.r_info); // RelocationType; lowest byte.
 
         /* data to be updated address */
         Elf32_Addr relAddr = ((Elf32_Addr) s->data) + rel.r_offset;
@@ -845,7 +869,7 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
 #if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SHSTRTAB
     {
         // Read the StringTable into memory
-        MSG("String Table Size: %d", section.sh_size);
+        MSG("shstrtab size: %d", section.sh_size);
         ctx->shstrtab = malloc( section.sh_size );
         if( NULL == ctx->shstrtab ) {
             ERR("Insufficient memory for StringTable\n");
@@ -976,7 +1000,8 @@ ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
                     ctx->text = section->data;
                 }
 
-                MSG("  section %2d: %-15s %08X %6i", n, name, (unsigned int) section->data, sectHdr.sh_size);
+                MSG("  section %2d: %-15s %08X %6i", n, name,
+                        (unsigned int) section->data, sectHdr.sh_size);
             }
         }
         else if (sectHdr.sh_type == SHT_RELA) { // Relocation entries with addends
@@ -1007,8 +1032,11 @@ ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
             if (strcmp(name, ".symtab") == 0) {
                 ctx->symtab_offset = sectHdr.sh_offset;
                 ctx->symtab_count = sectHdr.sh_size / sizeof(Elf32_Sym);
+                MSG("symtab is %u bytes.", sectHdr.sh_size);
+                MSG("symtab contains %u entires.", ctx->symtab_count);
             } else if (strcmp(name, ".strtab") == 0) {
                 ctx->strtab_offset = sectHdr.sh_offset;
+                MSG("strtab is %u bytes.", sectHdr.sh_size);
             }
         }
     }
@@ -1133,6 +1161,9 @@ void elfLoaderProfilerReset() {
     memset(&profiler_relocateSection, 0, sizeof(profiler_timer_t));
     profiler_cache_hit = 0;
     profiler_cache_miss = 0;
+    profiler_max_r_offset = 0;
+    profiler_max_r_addend = 0;
+    profiler_rel_count = 0;
 }
 
 /* Prints the profiler results to uart console */
@@ -1157,8 +1188,11 @@ void elfLoaderProfilerPrint() {
             "findSymAddr:           %10lld    %8d\n"
             "relocateSection:       %10lld    %8d\n"
             "total time:            %10lld\n"
-            "Cache Hit:   %llu\n"
-            "Cache Miss:  %llu\n"
+            "Cache Hit:             %10llu\n"
+            "Cache Miss:            %10llu\n"
+            "Relocations Performed: %10u\n"
+            "Max RELA r_offset:     %10u (0x%08X)\n"
+            "Max RELA r_addend:     %10u (0x%08X)\n"
             "-----------------------------\n\n",
             profiler_readSection.t,     profiler_readSection.n,
             profiler_readSymbol.t,      profiler_readSymbol.n,
@@ -1167,7 +1201,10 @@ void elfLoaderProfilerPrint() {
             profiler_findSymAddr.t,     profiler_findSymAddr.n,
             profiler_relocateSection.t, profiler_relocateSection.n,
             total_time,
-            profiler_cache_hit, profiler_cache_miss);
+            profiler_cache_hit, profiler_cache_miss,
+            profiler_rel_count,
+            profiler_max_r_offset, profiler_max_r_offset,
+            profiler_max_r_addend, profiler_max_r_addend);
 }
 #endif
 
