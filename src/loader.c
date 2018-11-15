@@ -208,7 +208,8 @@ struct ELFLoaderContext_t {
 
 static const char* TAG = "elfLoader";
 
-#define MSG(...) ESP_LOGI(TAG,  __VA_ARGS__);
+#define MSG(...) ESP_LOGD(TAG,  __VA_ARGS__);
+#define MSGI(...) ESP_LOGI(TAG,  __VA_ARGS__);
 #define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
 
 #define CEIL4(x) ((x+3)&~0x03)
@@ -730,6 +731,7 @@ void elfLoaderFree(ELFLoaderContext_t* ctx) {
         #if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SECTIONS
         if( NULL != ctx->shdr_cache ) {
             free( ctx->shdr_cache );
+            ctx->shdr_cache = NULL;
         }
         #endif
 
@@ -737,6 +739,7 @@ void elfLoaderFree(ELFLoaderContext_t* ctx) {
         for(uint8_t i=0; i < CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_N; i++ ) {
             if( NULL != ctx->locality_cache[i].data) {
                 free(ctx->locality_cache[i].data);
+                ctx->locality_cache[i].data = NULL;
             }
         }
         #endif
@@ -1070,6 +1073,23 @@ int elfLoaderRun(ELFLoaderContext_t *ctx, int argc, char **argv) {
     if (!ctx->exec) {
         return 0;
     }
+
+    /* Free up loading cache */
+    #if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SECTIONS
+    if( NULL != ctx->shdr_cache ) {
+        free( ctx->shdr_cache );
+        ctx->shdr_cache = NULL;
+    }
+    #endif
+    #if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_LOCALITY
+    for(uint8_t i=0; i < CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_N; i++ ) {
+        if( NULL != ctx->locality_cache[i].data) {
+            free(ctx->locality_cache[i].data);
+            ctx->locality_cache[i].data = NULL;
+        }
+    }
+    #endif
+
     typedef int (*func_t)(int, char**);
     func_t func = (func_t)ctx->exec;
     MSG("Running...");
@@ -1127,7 +1147,7 @@ void elfLoaderProfilerPrint() {
         profiler_relocateSection.t
         ;
 
-    MSG(  "\n-----------------------------\n"
+    MSGI(  "\n-----------------------------\n"
             "ELF Loader Profiling Results:\n"
             "Function Name          Time (uS)    Calls \n"
             "readSection:           %10lld    %8d\n"
