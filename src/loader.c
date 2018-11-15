@@ -23,92 +23,30 @@
  * Modified by Jim Huang (jserv.tw@gmail.com)
  */
 
-
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#if CONFIG_ELFLOADER_PROFILER_EN
-#include <esp_timer.h> // profiling
-#endif // CONFIG_ELFLOADER_PROFILER_EN
-
 #include "elfloader.h"
 #include "elf.h"
 #include "unaligned.h"
 
-#ifdef __linux__
-
-#include <malloc.h>
-#define LOADER_ALLOC_EXEC(size) memalign(4, size)
-#define LOADER_ALLOC_DATA(size) memalign(4, size)
-
-#define MSG(...) printf(__VA_ARGS__); printf("\n");
-#define ERR(...) printf(__VA_ARGS__); printf("\n");
-
-#define LOADER_GETDATA(ctx, off, buffer, size) \
-    if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
-    if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
-
-#elif ESP_PLATFORM
-
+#if ESP_PLATFORM
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
-static const char* TAG = "elfLoader";
-
-#define MSG(...) ESP_LOGI(TAG,  __VA_ARGS__);
-#define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
-
-
-#define CEIL4(x) ((x+3)&~0x03)
-#define LOADER_ALLOC_EXEC(size) heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT)
-#define LOADER_ALLOC_DATA(size) heap_caps_malloc(size, MALLOC_CAP_8BIT)
-
-#if CONFIG_ELFLOADER_POSIX
-// Works with filesystem, but is quite slow
-#define LOADER_GETDATA(ctx, off, buffer, size) \
-    if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
-    if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
-#elif CONFIG_ELFLOADER_MEMORY_POINTER
-// operate directly on memory, much faster
-#define LOADER_GETDATA(ctx, off, buffer, size) \
-        unalignedCpy(buffer, ctx->fd + off, size); if(0) goto err;
-#endif
+#if CONFIG_ELFLOADER_PROFILER_EN
+#include <esp_timer.h> // profiling
+#endif // CONFIG_ELFLOADER_PROFILER_EN
 
 #endif
 
-typedef struct ELFLoaderSection_t {
-    void *data;
-    int secIdx;
-    size_t size;
-    off_t relSecIdx;                 // 
-    struct ELFLoaderSection_t* next; // Next Header in Singly Linked List
-} ELFLoaderSection_t;
 
-struct ELFLoaderContext_t {
-    LOADER_FD_T fd;
-    void* exec;
-    void* text;
-    const ELFLoaderEnv_t *env;
-
-    size_t e_shnum;
-    off_t e_shoff;
-
-    size_t symtab_count;
-    off_t symtab_offset;
-    off_t strtab_offset;
-#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_STRTAB
-    char *shstrtab; // for caching the section header string table
-#else
-    off_t shstrtab_offset;
-#endif
-
-    ELFLoaderSection_t* section; // First element of singly linked list sections.
-};
-
-/* Profiler Variables */
+/******************
+ * Profiler Tools *
+ ******************/
 #if CONFIG_ELFLOADER_PROFILER_EN
 typedef struct profiler_timer_t{
     int64_t t;       // time in uS spent
@@ -116,13 +54,16 @@ typedef struct profiler_timer_t{
     bool running;    // if timer is running
 } profiler_timer_t;
 
-static profiler_timer_t profiler_readSection = { 0 };
-static profiler_timer_t profiler_readSymbol = { 0 };
-static profiler_timer_t profiler_readSymbolFunc = { 0 };
-static profiler_timer_t profiler_relocateSymbol = { 0 };
-static profiler_timer_t profiler_findSymAddr = { 0 };
-static profiler_timer_t profiler_findSection = { 0 };
-static profiler_timer_t profiler_relocateSection = { 0 };
+static profiler_timer_t profiler_readSection      = { 0 };
+static profiler_timer_t profiler_readSymbol       = { 0 };
+static profiler_timer_t profiler_readSymbolFunc   = { 0 };
+static profiler_timer_t profiler_relocateSymbol   = { 0 };
+static profiler_timer_t profiler_findSymAddr      = { 0 };
+static profiler_timer_t profiler_findSection      = { 0 };
+static profiler_timer_t profiler_relocateSection  = { 0 };
+
+static uint64_t profiler_cache_hit  = 0;
+static uint64_t profiler_cache_miss = 0;
 
 #define PROFILER_START(x) \
     if(!x.running) { \
@@ -147,21 +88,24 @@ static profiler_timer_t profiler_relocateSection = { 0 };
 #define PROFILER_START_FINDSECTION     PROFILER_START(profiler_findSection)
 #define PROFILER_START_RELOCATESECTION PROFILER_START(profiler_relocateSection)
 
-#define PROFILER_STOP_READSECTION     PROFILER_STOP(profiler_readSection)
-#define PROFILER_STOP_READSYMBOL      PROFILER_STOP(profiler_readSymbol)
-#define PROFILER_STOP_READSYMBOLFUNC  PROFILER_STOP(profiler_readSymbolFunc)
-#define PROFILER_STOP_RELOCATESYMBOL  PROFILER_STOP(profiler_relocateSymbol)
-#define PROFILER_STOP_FINDSYMADDR     PROFILER_STOP(profiler_findSymAddr)
-#define PROFILER_STOP_FINDSECTION     PROFILER_STOP(profiler_findSection)
-#define PROFILER_STOP_RELOCATESECTION PROFILER_STOP(profiler_relocateSection)
+#define PROFILER_STOP_READSECTION      PROFILER_STOP(profiler_readSection)
+#define PROFILER_STOP_READSYMBOL       PROFILER_STOP(profiler_readSymbol)
+#define PROFILER_STOP_READSYMBOLFUNC   PROFILER_STOP(profiler_readSymbolFunc)
+#define PROFILER_STOP_RELOCATESYMBOL   PROFILER_STOP(profiler_relocateSymbol)
+#define PROFILER_STOP_FINDSYMADDR      PROFILER_STOP(profiler_findSymAddr)
+#define PROFILER_STOP_FINDSECTION      PROFILER_STOP(profiler_findSection)
+#define PROFILER_STOP_RELOCATESECTION  PROFILER_STOP(profiler_relocateSection)
 
-#define PROFILER_INC_READSECTION     PROFILER_INC(profiler_readSection)
-#define PROFILER_INC_READSYMBOL      PROFILER_INC(profiler_readSymbol)
-#define PROFILER_INC_READSYMBOLFUNC  PROFILER_INC(profiler_readSymbolFunc)
-#define PROFILER_INC_RELOCATESYMBOL  PROFILER_INC(profiler_relocateSymbol)
-#define PROFILER_INC_FINDSYMADDR     PROFILER_INC(profiler_findSymAddr)
-#define PROFILER_INC_FINDSECTION     PROFILER_INC(profiler_findSection)
-#define PROFILER_INC_RELOCATESECTION PROFILER_INC(profiler_relocateSection)
+#define PROFILER_INC_READSECTION       PROFILER_INC(profiler_readSection)
+#define PROFILER_INC_READSYMBOL        PROFILER_INC(profiler_readSymbol)
+#define PROFILER_INC_READSYMBOLFUNC    PROFILER_INC(profiler_readSymbolFunc)
+#define PROFILER_INC_RELOCATESYMBOL    PROFILER_INC(profiler_relocateSymbol)
+#define PROFILER_INC_FINDSYMADDR       PROFILER_INC(profiler_findSymAddr)
+#define PROFILER_INC_FINDSECTION       PROFILER_INC(profiler_findSection)
+#define PROFILER_INC_RELOCATESECTION   PROFILER_INC(profiler_relocateSection)
+
+#define PROFILER_CACHE_HIT             profiler_cache_hit++;
+#define PROFILER_CACHE_MISS            profiler_cache_miss++;
 
 #else
 // dummy macros
@@ -188,6 +132,175 @@ static profiler_timer_t profiler_relocateSection = { 0 };
 #define PROFILER_INC_FINDSECTION 
 #define PROFILER_INC_RELOCATESECTION
 
+#define PROFILER_CACHE_HIT
+#define PROFILER_CACHE_MISS
+
+#endif
+
+/* Profiler Tools End */
+
+#if CONFIG_ELFLOADER_CACHE_LOCALITY
+typedef struct locality_cache_t{
+    char *data;
+    uint8_t age; // lower number means most recently used
+    size_t offset;
+    bool valid;
+} locality_cache_t;
+#endif
+
+typedef struct ELFLoaderSection_t {
+    void *data;
+    int secIdx;
+    size_t size;
+    off_t relSecIdx;                 // 
+    struct ELFLoaderSection_t* next; // Next Header in Singly Linked List
+} ELFLoaderSection_t;
+
+struct ELFLoaderContext_t {
+    LOADER_FD_T fd;
+    void* exec;
+    void* text;
+    const ELFLoaderEnv_t *env;
+
+    size_t e_shnum;
+    off_t e_shoff;
+
+    size_t symtab_count;
+    off_t symtab_offset;
+    off_t strtab_offset;
+
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SHSTRTAB
+    char *shstrtab; // for caching the section header string table
+#else
+    off_t shstrtab_offset;
+#endif
+
+    ELFLoaderSection_t *section; // First element of singly linked list sections.
+
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SECTIONS
+    Elf32_Shdr *shdr_cache;
+#endif
+
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_LOCALITY
+    locality_cache_t locality_cache[CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_N];
+#endif
+};
+
+
+#ifdef __linux__
+
+#include <malloc.h>
+#define LOADER_ALLOC_EXEC(size) memalign(4, size)
+#define LOADER_ALLOC_DATA(size) memalign(4, size)
+
+#define MSG(...) printf(__VA_ARGS__); printf("\n");
+#define ERR(...) printf(__VA_ARGS__); printf("\n");
+
+#define LOADER_GETDATA(ctx, off, buffer, size) \
+    if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
+    if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
+
+#elif ESP_PLATFORM
+
+#include "esp_system.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+
+static const char* TAG = "elfLoader";
+
+#define MSG(...) ESP_LOGI(TAG,  __VA_ARGS__);
+#define ERR(...) ESP_LOGE(TAG,  __VA_ARGS__);
+
+#define CEIL4(x) ((x+3)&~0x03)
+#define LOADER_ALLOC_EXEC(size) heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT)
+#define LOADER_ALLOC_DATA(size) heap_caps_malloc(size, MALLOC_CAP_8BIT)
+
+// Works with filesystem, but is quite slow
+#if CONFIG_ELFLOADER_POSIX
+
+#if CONFIG_ELFLOADER_CACHE_LOCALITY
+static int LOADER_GETDATA_CACHE(ELFLoaderContext_t *ctx,
+        size_t off, char *buffer, size_t size) {
+    uint8_t i;
+    size_t amount_read;
+    /* Check if the requested data is in the cache */
+    locality_cache_t *lru = &(ctx->locality_cache[0]);
+
+    /* Increment age of all chunks */
+    for( i=0; i < CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_N; i++ ) {
+        ctx->locality_cache[i].age++;
+    }
+
+    for( i=0; i < CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_N; i++ ) {
+        if( false == ctx->locality_cache[i].valid ) {
+            lru = &(ctx->locality_cache[i]);
+            break;
+        }
+
+        /* Store the LRU cache */
+        if( ctx->locality_cache[i].age > lru->age ) {
+            lru = &(ctx->locality_cache[i]);
+        }
+
+        /* See if data is cached */
+        if( off >= ctx->locality_cache[i].offset
+                && (off + size) <= (ctx->locality_cache[i].offset 
+                                   + CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_SIZE) ) {
+            PROFILER_CACHE_HIT;
+            MSG( "Hit! Hit Counter: %lld. Offset: 0x%x", 
+                    profiler_cache_hit, (uint32_t)off );
+            ctx->locality_cache[i].age = 0;
+            off_t locality_offset;
+            locality_offset = off - ctx->locality_cache[i].offset;
+            memcpy(buffer, ctx->locality_cache[i].data + locality_offset, size);
+            return 0;
+        }
+    }
+    
+    PROFILER_CACHE_MISS;
+    MSG("Miss... Miss Counter: %lld. Offset: 0x%x",
+            profiler_cache_miss, (uint32_t) off);
+    if( fseek(ctx->fd, off, SEEK_SET) != 0 ) {
+        assert(0);
+        goto err;
+    }
+    if( size > CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_SIZE ) {
+        /* Can't fit desired data into a chunk, don't cache */
+        amount_read = fread(buffer, 1, size, ctx->fd); 
+    }
+    else {
+        amount_read = fread(lru->data, 1,
+                CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_SIZE, ctx->fd); 
+        lru->offset = off;
+        lru->valid = true;
+        lru->age = 0;
+        memcpy(buffer, lru->data, size);
+    }
+
+    if( amount_read < size) {
+        ERR("Requested %d bytes, but could only read %d.", size, amount_read);
+        assert(0);
+        goto err;
+    }
+    return 0;
+
+err:
+    return -1;
+}
+#define LOADER_GETDATA(ctx, off, buffer, size) \
+    if( 0 != LOADER_GETDATA_CACHE(ctx, off, buffer, size)) { assert(0); goto err; }
+#else
+#define LOADER_GETDATA(ctx, off, buffer, size) \
+    if(fseek(ctx->fd, off, SEEK_SET) != 0) { assert(0); goto err; }\
+    if(fread(buffer, 1, size, ctx->fd) != size) { assert(0); goto err; }
+#endif // CONFIG_ELFLOADER_CACHE_LOCALITY
+
+#elif CONFIG_ELFLOADER_MEMORY_POINTER
+// operate directly on memory, much faster
+#define LOADER_GETDATA(ctx, off, buffer, size) \
+        unalignedCpy(buffer, ctx->fd + off, size); if(0) goto err;
+#endif
+
 #endif
 
 /*** Read data functions ***/
@@ -198,27 +311,46 @@ static profiler_timer_t profiler_relocateSection = { 0 };
  * name - Returns Section Name
  * name_len - Length of Name buffer
  */
-static int readSection(ELFLoaderContext_t *ctx, int n, Elf32_Shdr *h,
-        char *name, const size_t name_len) {
+static int readSection(ELFLoaderContext_t *ctx, int n,
+        Elf32_Shdr *h, char *name, const size_t name_len) {
     PROFILER_START_READSECTION;
     PROFILER_INC_READSECTION;
 
-    off_t offset;
-
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SECTIONS
+    /* Check the section cache before attempt to read from flash */
+    if( 0 == ctx->shdr_cache[n].sh_name
+            && 0 == ctx->shdr_cache[n].sh_type
+            && 0 == ctx->shdr_cache[n].sh_flags
+            && 0 == ctx->shdr_cache[n].sh_addr
+            && 0 == ctx->shdr_cache[n].sh_offset
+            && 0 == ctx->shdr_cache[n].sh_size
+            && 0 == ctx->shdr_cache[n].sh_link
+            && 0 == ctx->shdr_cache[n].sh_info
+            && 0 == ctx->shdr_cache[n].sh_addralign
+            && 0 == ctx->shdr_cache[n].sh_entsize) {
+        /* This Section Header has not been read in yet */
+        /* Read Section Header */
+        off_t offset = ctx->e_shoff + n * sizeof(Elf32_Shdr);
+        LOADER_GETDATA(ctx, offset, &(ctx->shdr_cache[n]), sizeof(Elf32_Shdr));
+    }
+    /* Copy over the cached section header */
+    memcpy(h, &(ctx->shdr_cache[n]), sizeof(Elf32_Shdr));
+#else
     /* Read Section Header */
-    if( h != NULL ) {
-        offset = ctx->e_shoff + n * sizeof(Elf32_Shdr);
+    {
+        off_t offset = ctx->e_shoff + n * sizeof(Elf32_Shdr);
         LOADER_GETDATA(ctx, offset, h, sizeof(Elf32_Shdr));
     }
+#endif
 
     /* Read Section Name */
     if (NULL != name && h->sh_name) {
         // h->sh_name is the offset into the StringTable where the 
         // NULL-terminated string is located.
-#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_STRTAB
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SHSTRTAB
         strlcpy(name, ctx->shstrtab + h->sh_name, name_len);
 #else
-        offset = ctx->shstrtab_offset + h->sh_name;
+        off_t offset = ctx->shstrtab_offset + h->sh_name;
         LOADER_GETDATA(ctx, offset, name, name_len);
 #endif
     }
@@ -530,8 +662,10 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
     MSG("  Offset   Sym  Type                      relAddr  "
         "symAddr  defValue                    Name + addend");
     for (size_t relCount = 0; relCount < relEntries; relCount++) {
-        LOADER_GETDATA(ctx, sectHdr.sh_offset + relCount * (sizeof(rel)),
-                &rel, sizeof(rel))
+        // todo: This looks expensive
+        off_t offset = sectHdr.sh_offset + relCount * (sizeof(rel));
+        MSG("Reading in ELF32_Rela from offset 0x%x", (uint32_t)offset);
+        LOADER_GETDATA(ctx, offset, &rel, sizeof(rel))
         Elf32_Sym sym;
         char name[65] = "<unnamed>";
         int symEntry = ELF32_R_SYM(rel.r_info);
@@ -586,11 +720,27 @@ err:
 }
 
 
-/*** Main functions ***/
+/******************
+ * Main functions *
+ ******************/
 
 
 void elfLoaderFree(ELFLoaderContext_t* ctx) {
-    if (ctx) {
+    if ( NULL != ctx ) {
+        #if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SECTIONS
+        if( NULL != ctx->shdr_cache ) {
+            free( ctx->shdr_cache );
+        }
+        #endif
+
+        #if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_LOCALITY
+        for(uint8_t i=0; i < CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_N; i++ ) {
+            if( NULL != ctx->locality_cache[i].data) {
+                free(ctx->locality_cache[i].data);
+            }
+        }
+        #endif
+
         ELFLoaderSection_t* section = ctx->section;
         ELFLoaderSection_t* next;
         while(section != NULL) {
@@ -639,6 +789,19 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
     ctx->fd = fd;
     ctx->env = env;
 
+    /*****************************
+     * Initialize Locality Cache *
+     *****************************/
+    #if CONFIG_ELFLOADER_CACHE_LOCALITY
+    for(uint8_t i=0; i < CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_N; i++ ) {
+        ctx->locality_cache[i].data = malloc(CONFIG_ELFLOADER_CACHE_LOCALITY_CHUNK_SIZE);
+        if(NULL == ctx->locality_cache[i].data) {
+            ERR("Insufficient memory for Locality Cache Data");
+            goto err;
+        }
+    }
+    #endif
+
     /********************************************************************
      * Load the ELF header (Ehdr), located at the beginning of the file *
      ********************************************************************/
@@ -655,6 +818,19 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
     ctx->e_shnum = header.e_shnum; // Number of Sections
     ctx->e_shoff = header.e_shoff; // offset to SectionHeaderTable
 
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SECTIONS
+    /************************************************
+     * Allocate an array to store Headers in Memory *
+     ************************************************/
+    MSG("Allocating %d bytes for section header cache.",
+            header.e_shnum * sizeof(Elf32_Shdr));
+    ctx->shdr_cache = calloc(header.e_shnum, sizeof(Elf32_Shdr));
+    if( NULL == ctx->shdr_cache ) {
+        ERR("Insufficient memory for section header cache array");
+        goto err;
+    }
+#endif
+
     /*********************************************
      * Load the SectionHeader of the StringTable *
      *********************************************/
@@ -663,15 +839,25 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
      * which begins at header.e_shoff. */
     LOADER_GETDATA(ctx, header.e_shoff + header.e_shstrndx * sizeof(Elf32_Shdr),
             &section, sizeof(Elf32_Shdr));
-#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_STRTAB
-    // Read the StringTable into memory
-    MSG("String Table Size: %d", section.sh_size);
-    ctx->shstrtab = malloc( section.sh_size );
-    if( NULL == ctx->shstrtab ) {
-        ERR("Insufficient memory for StringTable\n");
-        goto err;
+#if CONFIG_ELFLOADER_POSIX && CONFIG_ELFLOADER_CACHE_SHSTRTAB
+    {
+        // Read the StringTable into memory
+        MSG("String Table Size: %d", section.sh_size);
+        ctx->shstrtab = malloc( section.sh_size );
+        if( NULL == ctx->shstrtab ) {
+            ERR("Insufficient memory for StringTable\n");
+            goto err;
+        }
+        LOADER_GETDATA(ctx, section.sh_offset, ctx->shstrtab, section.sh_size);
+        uint32_t null_counter = 0;
+        for(uint32_t i=0; i < section.sh_size; i++) {
+            if( ctx->shstrtab[i] == '\0' ){
+                null_counter++;
+            }
+        }
+        MSG("%d NULL characters found in the String Table.", null_counter);
+
     }
-    LOADER_GETDATA(ctx, section.sh_offset, ctx->shstrtab, section.sh_size);
 #else
     // Store the offset from beginning of ELF where the StringTable begins.
     ctx->shstrtab_offset = section.sh_offset;
@@ -680,13 +866,12 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
     return ctx;
 
 err:
-    if( NULL != ctx ) {
-        free(ctx);
-    }
+    elfLoaderFree(ctx);
     return NULL;
 }
 
-/* user has to remember to free allocated content buffer */
+/* user has to remember to free allocated content buffer 
+ *  Not internally used, but useful in other applications. */
 void *elfLoaderLoadSectionByName(const ELFLoaderContext_t *ctx, const char *target, size_t *data_len ) {
     for (int n = 1; n < ctx->e_shnum; n++) {
         Elf32_Shdr sectHdr;
@@ -926,6 +1111,8 @@ void elfLoaderProfilerReset() {
     memset(&profiler_findSymAddr, 0, sizeof(profiler_timer_t));
     memset(&profiler_findSection, 0, sizeof(profiler_timer_t));
     memset(&profiler_relocateSection, 0, sizeof(profiler_timer_t));
+    profiler_cache_hit = 0;
+    profiler_cache_miss = 0;
 }
 
 /* Prints the profiler results to uart console */
@@ -940,7 +1127,8 @@ void elfLoaderProfilerPrint() {
         profiler_relocateSection.t
         ;
 
-    MSG("\nELF Loader Profiling Results:\n"
+    MSG(  "\n-----------------------------\n"
+            "ELF Loader Profiling Results:\n"
             "Function Name          Time (uS)    Calls \n"
             "readSection:           %10lld    %8d\n"
             "readSymbol:            %10lld    %8d\n"
@@ -949,14 +1137,17 @@ void elfLoaderProfilerPrint() {
             "findSymAddr:           %10lld    %8d\n"
             "relocateSection:       %10lld    %8d\n"
             "total time:            %10lld\n"
-            "\n",
+            "Cache Hit:   %llu\n"
+            "Cache Miss:  %llu\n"
+            "-----------------------------\n\n",
             profiler_readSection.t,     profiler_readSection.n,
             profiler_readSymbol.t,      profiler_readSymbol.n,
             profiler_readSymbolFunc.t,  profiler_readSymbolFunc.n,
             profiler_relocateSymbol.t,  profiler_relocateSymbol.n,
             profiler_findSymAddr.t,     profiler_findSymAddr.n,
             profiler_relocateSection.t, profiler_relocateSection.n,
-            total_time);
+            total_time,
+            profiler_cache_hit, profiler_cache_miss);
 }
 #endif
 

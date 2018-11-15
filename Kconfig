@@ -37,15 +37,50 @@ config ELFLOADER_PROFILER_EN
     help
         Enable profiling tools. Takes up additional memory and some CPU cycles.
 
-config ELFLOADER_CACHE_STRTAB
+config ELFLOADER_CACHE_SHSTRTAB
     bool
     depends on ELFLOADER_POSIX
-    prompt "Cache StringTable to Memory"
+    prompt "Cache Section Header StringTable to Memory"
     default y
     help
-        Allocates memory to cache the .strtab section to memory. In tests, 
+        Allocates memory to cache the .shstrtab section to memory. In tests, 
         this occupies ~4KB of memory (depends on number of symbols and name 
         length, just provided here for a magnitude estimate) and made loading 
         500mS faster.
+
+config ELFLOADER_CACHE_SECTIONS
+    bool
+    depends on ELFLOADER_POSIX
+    prompt "Cache Sections as they are read"
+    default y
+    help
+        Allocates memory for every section read to reduce repeated flash reads.
+        Frees these sections after loading is complete.
+
+config ELFLOADER_CACHE_LOCALITY
+    bool
+    depends on ELFLOADER_POSIX
+    prompt "Read ahead as filesystem is accessed"
+    default y
+    help
+        help text here.
+
+config ELFLOADER_CACHE_LOCALITY_CHUNK_SIZE
+    int
+    depends on ELFLOADER_CACHE_LOCALITY
+    prompt "Read ahead as filesystem is accessed"
+    default 1024
+    range 128 65536
+    help
+        chunk size for read ahead in bytes.
+
+config ELFLOADER_CACHE_LOCALITY_CHUNK_N
+    int
+    depends on ELFLOADER_CACHE_LOCALITY
+    prompt "Number of chunks to cache"
+    default 5
+    range 0 255
+    help
+        number of chunks to cache.
 
 endmenu
