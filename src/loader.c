@@ -605,6 +605,12 @@ static ELFLoaderSection_t *findSection(ELFLoaderContext_t* ctx, int index) {
 }
 
 
+/* Searches through the Host's Exported Function List and returns the address 
+ * of the function with the same name as sName.
+ *
+ * If a matching exported function cannot be found, it searches the executable 
+ * sections from the ELF file and returns the address of the symbol.
+ * */
 static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx,
         Elf32_Sym *sym, const char *sName) {
     PROFILER_START_FINDSYMADDR;
@@ -641,6 +647,7 @@ static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx,
         }
     }
     #endif
+    MSG("Couldn't find symbol address in host exported list");
 
     ELFLoaderSection_t *symSec = findSection(ctx, sym->st_shndx);
     if (symSec) {
@@ -648,6 +655,7 @@ static Elf32_Addr findSymAddr(ELFLoaderContext_t* ctx,
         return ((Elf32_Addr) symSec->data) + sym->st_value;
     }
     PROFILER_STOP_FINDSYMADDR;
+    MSG("Couldn't find symbol address in loaded sections");
     return 0xffffffff;
 }
 
@@ -704,6 +712,7 @@ static int relocateSection(ELFLoaderContext_t *ctx, ELFLoaderSection_t *s) {
 
         /* Target Symbol Address */
         PROFILER_STOP_RELOCATESECTION;
+        // Returns 0xffffffff if symbol cannot be found
         Elf32_Addr symAddr = findSymAddr(ctx, &sym, name) + rel.r_addend;
         PROFILER_START_RELOCATESECTION;
 
@@ -870,6 +879,7 @@ ELFLoaderContext_t *elfLoaderInit(LOADER_FD_T fd, const ELFLoaderEnv_t *env) {
     {
         // Read the StringTable into memory
         MSG("shstrtab size: %d", section.sh_size);
+        MSG("shstrtab name index: %d", section.sh_name);
         ctx->shstrtab = malloc( section.sh_size );
         if( NULL == ctx->shstrtab ) {
             ERR("Insufficient memory for StringTable\n");
@@ -1036,7 +1046,8 @@ ELFLoaderContext_t* elfLoaderLoad(ELFLoaderContext_t *ctx) {
                 MSG("symtab contains %u entires.", ctx->symtab_count);
             } else if (strcmp(name, ".strtab") == 0) {
                 ctx->strtab_offset = sectHdr.sh_offset;
-                MSG("strtab is %u bytes.", sectHdr.sh_size);
+                MSG("strtab is %u bytes starting at offset 0x%8X.",
+                        sectHdr.sh_size, sectHdr.sh_offset);
             }
         }
     }
@@ -1052,31 +1063,40 @@ err:
 ELFLoaderContext_t* elfLoaderRelocate(ELFLoaderContext_t *ctx) {
     MSG("Relocating sections");
     int r = 0;
+    uint32_t count = 0;
     for (ELFLoaderSection_t* section = ctx->section; section != NULL; section = section->next) {
         r |= relocateSection(ctx, section);
+        count++;
     }
     if (r != 0) {
         MSG("Relocation failed");
         goto err;
     }
+    MSG("Successfully relocated %d sections.", count);
     return ctx;
 
 err:
     return NULL;
 }
 
+/* Sets Entry Point Function */
 int elfLoaderSetFunc(ELFLoaderContext_t *ctx, char* funcname) {
+    /* Initializes exec to default NULL ptr */
     ctx->exec = 0;
     MSG("Scanning ELF symbols");
     MSG("  Sym  Symbol                         sect value    size relAddr");
-    // Start from the end because it'll probably be closer
+
+    /* Iterate through the symbol table, looking for a symbol with same name
+     * Start from the end because it'll probably be closer */
     for (int symCount = ctx->symtab_count - 1; symCount >= 0; symCount--) {
         Elf32_Sym sym;
         char name[33] = "<unnamed>";
+        /* Read symbol, and more importantly, it's name */
         if (readSymbolFunc(ctx, symCount, &sym, name, sizeof(name)) != 0) {
             ERR("Error reading symbol");
             return -1;
         }
+        /* Check for name match */
         if(strcmp(name, funcname) == 0) {
             Elf32_Addr symAddr = findSymAddr(ctx, &sym, name);
             if (symAddr == 0xffffffff) {
